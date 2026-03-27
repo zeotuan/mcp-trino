@@ -454,3 +454,34 @@ func assertContentContains(t *testing.T, result *mcp.CallToolResult, want string
 	}
 	t.Errorf("result content does not contain %q", want)
 }
+
+// TestMatchLikePattern verifies the SQL LIKE-style matching helper.
+func TestMatchLikePattern(t *testing.T) {
+	tests := []struct {
+		value, pattern string
+		want           bool
+	}{
+		{"delta", "delta", true},
+		{"delta", "Delta", true},       // case-insensitive
+		{"delta", "sigma", false},
+		{"delta", "%", true},            // match all
+		{"delta", "%elt%", true},        // contains
+		{"delta", "%xyz%", false},
+		{"delta", "del%", true},         // prefix
+		{"delta", "sig%", false},
+		{"delta", "%lta", true},         // suffix
+		{"delta", "%ltz", false},
+		{"production", "%prod%", true},
+		{"system", "%prod%", false},
+		{"", "%", true},
+		{"", "", true},
+		{"delta", "d%a", true},          // starts and ends
+		{"delta", "d%z", false},
+	}
+	for _, tt := range tests {
+		got := matchLikePattern(tt.value, tt.pattern)
+		if got != tt.want {
+			t.Errorf("matchLikePattern(%q, %q) = %v, want %v", tt.value, tt.pattern, got, tt.want)
+		}
+	}
+}

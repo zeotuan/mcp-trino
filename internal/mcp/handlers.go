@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -108,11 +109,30 @@ func (h *TrinoHandlers) ListCatalogs(ctx context.Context, request mcp.CallToolRe
 		ctx = h.prepareImpersonationContext(ctx)
 	}
 
+	// Extract optional like parameter for filtering
+	var likePattern string
+	if args, ok := request.Params.Arguments.(map[string]interface{}); ok {
+		if like, ok := args["like"].(string); ok {
+			likePattern = like
+		}
+	}
+
 	catalogs, err := h.TrinoClient.ListCatalogsWithContext(ctx)
 	if err != nil {
 		log.Printf("Error listing catalogs: %v", err)
 		mcpErr := fmt.Errorf("failed to list catalogs: %w", err)
 		return mcp.NewToolResultErrorFromErr(mcpErr.Error(), mcpErr), nil
+	}
+
+	// Apply client-side like filter if provided
+	if likePattern != "" {
+		filtered := make([]string, 0)
+		for _, catalog := range catalogs {
+			if matchLikePattern(catalog, likePattern) {
+				filtered = append(filtered, catalog)
+			}
+		}
+		catalogs = filtered
 	}
 
 	// Convert catalogs to JSON string for display
@@ -308,7 +328,8 @@ func RegisterTrinoTools(m *server.MCPServer, h *TrinoHandlers) {
 	m.AddTool(mcp.NewTool("list_catalogs",
 		mcp.WithDescription("Discover available Trino catalogs - each catalog represents a connector to different data systems (PostgreSQL, MySQL, S3, HDFS, Kafka, etc.). Catalogs are your entry point to querying data across heterogeneous systems in a single SQL query."),
 		mcp.WithTitleAnnotation("List Catalogs"),
-		mcp.WithReadOnlyHintAnnotation(true)),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("like", mcp.Description("Optional filter pattern for catalog names (SQL LIKE syntax: use '%' for wildcards, e.g. 'delta' or '%prod%')"))),
 		h.ListCatalogs)
 
 	m.AddTool(mcp.NewTool("list_schemas",
@@ -342,4 +363,37 @@ func RegisterTrinoTools(m *server.MCPServer, h *TrinoHandlers) {
 		mcp.WithString("query", mcp.Required(), mcp.Description("SQL query to analyze (SELECT, JOIN, aggregations, etc.)")),
 		mcp.WithString("format", mcp.Description("Plan type: LOGICAL, DISTRIBUTED, VALIDATE, or IO (optional)"))),
 		h.ExplainQuery)
+}
+
+// matchLikePattern performs SQL LIKE-style matching with % as wildcard.
+// The match is case-insensitive.
+func matchLikePattern(value, pattern string) bool {
+	v := strings.ToLower(value)
+	p := strings.ToLower(pattern)
+
+	parts := strings.Split(p, "%")
+	if len(parts) == 1 {
+		return v == p
+	}
+
+	pos := 0
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(v[pos:], part)
+		if idx < 0 {
+			return false
+		}
+		if i == 0 && idx != 0 {
+			// First part must match at start if pattern doesn't start with %
+			return false
+		}
+		pos += idx + len(part)
+	}
+	// If pattern doesn't end with %, value must end at pos
+	if parts[len(parts)-1] != "" && pos != len(v) {
+		return false
+	}
+	return true
 }
