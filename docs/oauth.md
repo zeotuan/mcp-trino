@@ -1055,3 +1055,109 @@ profiles:
 | `User X cannot impersonate user Y` | `TRINO_USER` must match `preferred_username` exactly (case-sensitive) |
 | Token refresh fails | Delete `~/.config/trino/token-cache-*.json` and re-authenticate |
 | Scopes error | Ensure `offline_access` is included for refresh token support |
+
+## Authorization Code + PKCE Flow (auth-code)
+
+The authorization code flow with PKCE (Proof Key for Code Exchange) opens a browser for the user to authenticate, then receives the token via a localhost callback. This is the standard OAuth flow for desktop/CLI apps.
+
+**Key difference from device-code**: Instead of showing a code in the terminal, a browser opens directly. Slightly smoother UX when a browser is available on the same machine.
+
+```mermaid
+sequenceDiagram
+    participant MCP as mcp-trino (local)
+    participant Browser as User's Browser
+    participant IdP as Azure AD / Okta
+    participant Trino as Trino Server
+
+    Note over MCP: First run (no cached token)
+    MCP->>MCP: 1. Generate PKCE code_verifier + code_challenge
+    MCP->>MCP: 2. Start localhost callback server
+    MCP->>Browser: 3. Open authorize URL
+    Browser->>IdP: 4. User logs in
+    IdP->>Browser: 5. Redirect to localhost/callback?code=...
+    Browser->>MCP: 6. Authorization code received
+    MCP->>IdP: 7. POST /token (code + code_verifier)
+    IdP->>MCP: 8. Access token + refresh token
+    MCP->>MCP: 9. Cache tokens to disk
+    MCP->>Trino: 10. SQL query + Authorization: Bearer <token>
+    Trino->>MCP: 11. Results
+
+    Note over MCP: Subsequent runs (cached token)
+    MCP->>MCP: Load cached token
+    MCP->>IdP: POST /token (refresh_token)
+    IdP->>MCP: New access token + refresh token
+    MCP->>Trino: SQL query + Authorization: Bearer <token>
+```
+
+### Configuration
+
+Set `TRINO_AUTH_MODE=auth-code` and provide the OAuth client configuration:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TRINO_AUTH_MODE` | Yes | Set to `auth-code` |
+| `TRINO_OAUTH_TOKEN_URL` | Yes | Token endpoint, e.g. `https://login.microsoftonline.com/{tenant-id}/oauth2/v2.0/token` |
+| `TRINO_OAUTH_CLIENT_ID` | Yes | Azure AD App Registration client ID |
+| `TRINO_OAUTH_CLIENT_SECRET` | No | Not required for public clients (recommended) |
+| `TRINO_OAUTH_SCOPES` | Yes | Comma-separated scopes including `offline_access` for refresh tokens |
+| `TRINO_USER` | Yes | Must match the `preferred_username` claim from Azure AD (case-sensitive) |
+
+### Example: Azure AD Setup
+
+**Environment variables:**
+
+```bash
+export TRINO_HOST=trino.example.com
+export TRINO_PORT=443
+export TRINO_SCHEME=https
+export TRINO_USER=Your.Username
+export TRINO_AUTH_MODE=auth-code
+export TRINO_OAUTH_TOKEN_URL=https://login.microsoftonline.com/YOUR_TENANT_ID/oauth2/v2.0/token
+export TRINO_OAUTH_CLIENT_ID=your-app-registration-client-id
+export TRINO_OAUTH_SCOPES=openid,profile,email,offline_access,api://your-app-id/user_impersonation
+```
+
+**MCP client config (e.g. Claude Desktop):**
+
+```json
+{
+  "mcpServers": {
+    "trino": {
+      "command": "mcp-trino",
+      "env": {
+        "TRINO_HOST": "trino.example.com",
+        "TRINO_PORT": "443",
+        "TRINO_SCHEME": "https",
+        "TRINO_USER": "Your.Username",
+        "TRINO_AUTH_MODE": "auth-code",
+        "TRINO_OAUTH_TOKEN_URL": "https://login.microsoftonline.com/TENANT/oauth2/v2.0/token",
+        "TRINO_OAUTH_CLIENT_ID": "client-id",
+        "TRINO_OAUTH_SCOPES": "openid,profile,email,offline_access,api://app-id/user_impersonation"
+      }
+    }
+  }
+}
+```
+
+> **Note:** No `TRINO_OAUTH_CLIENT_SECRET` needed — auth-code with PKCE is a public client flow.
+
+### Azure AD App Registration Requirements
+
+1. **Allow public client flows** must be **Yes** (Authentication → Advanced settings)
+2. Add **Mobile and desktop applications** platform with `http://localhost` redirect URI
+3. The app must have the required API permissions configured
+4. `offline_access` scope is required for refresh token support
+
+### Token Cache
+
+Same as device-code: tokens cached at `~/.config/trino/token-cache-{hash}.json`. Auth-code and device-code share the same cache (same hash for same token URL + client ID), so authenticating with one flow works for the other.
+
+### Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Browser doesn't open | Manually open the URL printed to stderr |
+| `AADSTS7000218: must contain client_secret` | Enable "Allow public client flows" in Azure AD app registration |
+| `User X cannot impersonate user Y` | `TRINO_USER` must match `preferred_username` exactly (case-sensitive) |
+| Token refresh fails | Delete `~/.config/trino/token-cache-*.json` and re-authenticate |
+| Callback timeout (120s) | Ensure browser can reach `http://localhost:<port>/callback` |
