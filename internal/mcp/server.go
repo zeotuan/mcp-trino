@@ -79,13 +79,13 @@ func (s *Server) ServeHTTP(port string) error {
 			s.mcpServer,
 			mcpserver.WithEndpointPath("/mcp"),
 			mcpserver.WithHTTPContextFunc(oauth.CreateHTTPContextFunc()),
-			mcpserver.WithStateLess(false),
+			mcpserver.WithStateLess(true),
 		)
 	} else {
 		streamableServer = mcpserver.NewStreamableHTTPServer(
 			s.mcpServer,
 			mcpserver.WithEndpointPath("/mcp"),
-			mcpserver.WithStateLess(false),
+			mcpserver.WithStateLess(true),
 		)
 	}
 
