@@ -21,7 +21,6 @@ type TrinoProfileConfig struct {
 		Enabled  *bool `yaml:"enabled"` // pointer to distinguish unset vs false
 		Insecure bool  `yaml:"insecure"`
 	} `yaml:"ssl"`
-	// OAuth auth for Trino connection
 	AuthMode      string `yaml:"auth_mode,omitempty"`       // "basic" (default) or "auth-code"
 	OAuthTokenURL string `yaml:"oauth_token_url,omitempty"` // Token endpoint URL
 	OAuthClientID string `yaml:"oauth_client_id,omitempty"` // Client ID
@@ -342,12 +341,9 @@ func (c *CLIConfig) SetCurrent(name string) error {
 	return SaveCLIConfig(c)
 }
 
-// ApplyToEnv applies CLI config to environment variables
-// This applies the active profile values to env vars (profiles override existing env vars)
-// CLI flags will later override these env vars (highest priority)
+// ApplyToEnv applies the active profile's values to environment variables.
 // When no config file was loaded (DefaultCLIConfig), env vars are preserved as-is.
 func (c *CLIConfig) ApplyToEnv(profileName string) error {
-	// If no config file was loaded, don't override env vars with built-in defaults
 	if !c.ConfigFileExists {
 		return nil
 	}
@@ -375,23 +371,16 @@ func (c *CLIConfig) ApplyToEnv(profileName string) error {
 		// When SSL is configured, also set INSECURE to match profile (overrides env var)
 		setEnvIfValue("TRINO_SSL_INSECURE", fmt.Sprintf("%t", profile.SSL.Insecure))
 	}
-	// OAuth fields for Trino connection auth
-	// When a real config file is loaded, reset auth_mode to basic if profile doesn't specify it
-	// This prevents stale TRINO_AUTH_MODE values from leaking across profile switches
-	// But don't reset when using DefaultCLIConfig (no config file) — respect env vars
 	if profile.AuthMode != "" {
 		setEnvIfValue("TRINO_AUTH_MODE", profile.AuthMode)
 	} else if c.ConfigFileExists {
-		// Only reset to basic when a real config file was loaded
 		_ = os.Setenv("TRINO_AUTH_MODE", "basic")
 	}
-	// Set auth-code fields from profile, or clear stale ones when switching to basic.
 	if profile.AuthMode == "auth-code" {
 		setOrUnsetEnv("TRINO_OAUTH_TOKEN_URL", profile.OAuthTokenURL)
 		setOrUnsetEnv("TRINO_OAUTH_CLIENT_ID", profile.OAuthClientID)
 		setOrUnsetEnv("TRINO_OAUTH_SCOPES", profile.OAuthScopes)
 	} else if c.ConfigFileExists {
-		// Clear stale auth env vars when switching to basic profile
 		_ = os.Unsetenv("TRINO_OAUTH_TOKEN_URL")
 		_ = os.Unsetenv("TRINO_OAUTH_CLIENT_ID")
 		_ = os.Unsetenv("TRINO_OAUTH_SCOPES")

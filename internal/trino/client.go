@@ -95,7 +95,7 @@ type oauth2TokenSource interface {
 
 // createTokenSource creates an oauth2TokenSource from config (nil for basic auth)
 func createTokenSource(cfg *config.TrinoConfig) oauth2TokenSource {
-	if cfg.TrinoAuthMode == "auth-code" {
+	if cfg.TrinoAuthMode == config.AuthModeAuthCode {
 		return createAuthCodeTokenSource(cfg)
 	}
 	return nil
@@ -105,7 +105,7 @@ func createTokenSource(cfg *config.TrinoConfig) oauth2TokenSource {
 func buildDSN(cfg *config.TrinoConfig) string {
 	var dsnURL url.URL
 
-	if cfg.TrinoAuthMode == "auth-code" {
+	if cfg.TrinoAuthMode == config.AuthModeAuthCode {
 		// OAuth mode: no password in DSN, user is optional for attribution
 		dsnURL = url.URL{
 			Scheme: cfg.Scheme,

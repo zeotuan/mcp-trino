@@ -23,7 +23,31 @@ This document outlines the OAuth 2.1 authentication architecture for mcp-trino s
 - Defense-in-depth: Multiple independent validation layers
 - Constant-time comparison prevents timing attacks
 
-## Architecture Overview
+## Two Separate Authentication Concerns
+
+mcp-trino has **two independent authentication layers** that are often confused:
+
+| Layer | Direction | Purpose | Config |
+|---|---|---|---|
+| **MCP API protection** | Client → MCP server | Ensures only authorised users/clients can call the MCP tools | `OAUTH_ENABLED`, `OAUTH_PROVIDER`, etc. (via oauth-mcp-proxy) |
+| **Trino backend auth** | MCP server → Trino | How mcp-trino authenticates to the Trino cluster | `TRINO_AUTH_MODE` |
+
+These are configured independently. `oauth-mcp-proxy` handles the first layer only — it has no concept of downstream service auth.
+
+### Trino Backend Auth Modes
+
+| `TRINO_AUTH_MODE` | Description | Deployment |
+|---|---|---|
+| `basic` (default) | Username + password in DSN | Any — local or remote |
+| `auth-code` | PKCE browser redirect + cached tokens | **LOCAL ONLY** — see below |
+
+> ⚠️ **`TRINO_AUTH_MODE=auth-code` is for LOCAL deployments only.**
+>
+> This mode opens a browser **on the host where mcp-trino runs** (via `exec.Command` / `xdg-open`), starts a local `localhost` callback server, and caches the resulting token to `~/.config/trino/`. It is designed exclusively for personal local use (STDIO transport, Claude Desktop, local IDE plugins).
+>
+> **Do not use `auth-code` with `MCP_TRANSPORT=http` or in any shared/remote deployment.** The browser opens on the server host (not the user's machine), the `localhost` callback is unreachable from the user's browser, and tokens cached on a shared host are a security risk. mcp-trino will log a warning if it detects this misconfiguration at startup.
+
+
 
 The mcp-trino server implements OAuth 2.0 as a **resource server**, validating JWT tokens from clients while maintaining existing Trino authentication methods.
 

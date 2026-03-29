@@ -715,7 +715,7 @@ func TestBuildDSN_BasicMode(t *testing.T) {
 		Scheme:        "https",
 		SSL:           true,
 		SSLInsecure:   true,
-		TrinoAuthMode: "basic",
+		TrinoAuthMode: config.AuthModeBasic,
 	}
 
 	dsn := buildDSN(cfg)
@@ -731,7 +731,7 @@ func TestBuildDSN_BasicMode(t *testing.T) {
 
 func TestCreateTokenSource(t *testing.T) {
 	cfg := &config.TrinoConfig{
-		TrinoAuthMode:      "auth-code",
+		TrinoAuthMode:      config.AuthModeAuthCode,
 		TrinoOAuthTokenURL: "https://login.microsoftonline.com/test-tenant/oauth2/v2.0/token",
 		TrinoOAuthClientID: "test-client-id",
 		TrinoOAuthScopes:   "api://trino/.default,openid",
@@ -745,7 +745,7 @@ func TestCreateTokenSource(t *testing.T) {
 
 func TestCreateTokenSource_BasicMode(t *testing.T) {
 	cfg := &config.TrinoConfig{
-		TrinoAuthMode: "basic",
+		TrinoAuthMode: config.AuthModeBasic,
 	}
 
 	ts := createTokenSource(cfg)
@@ -756,7 +756,7 @@ func TestCreateTokenSource_BasicMode(t *testing.T) {
 
 func TestCreateTokenSource_NoScopes(t *testing.T) {
 	cfg := &config.TrinoConfig{
-		TrinoAuthMode:      "auth-code",
+		TrinoAuthMode:      config.AuthModeAuthCode,
 		TrinoOAuthTokenURL: "https://login.microsoftonline.com/test/oauth2/v2.0/token",
 		TrinoOAuthClientID: "id",
 		TrinoOAuthScopes:   "",

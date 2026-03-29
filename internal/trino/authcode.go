@@ -3,18 +3,15 @@ package trino
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"html"
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -22,10 +19,9 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// authCodeTokenSource implements oauth2TokenSource using Authorization Code + PKCE flow
+// authCodeTokenSource implements oauth2TokenSource using Authorization Code + PKCE flow.
 type authCodeTokenSource struct {
 	oauthCacheHelper
-	authorizeURL string
 
 	mu    sync.Mutex
 	token *oauth2.Token
@@ -36,9 +32,9 @@ type authCodeTokenSource struct {
 	serverTimeout time.Duration
 }
 
-// createAuthCodeTokenSource creates an auth code + PKCE token source from config
+// createAuthCodeTokenSource creates an auth code + PKCE token source from config.
 func createAuthCodeTokenSource(cfg *config.TrinoConfig) oauth2TokenSource {
-	if cfg.TrinoAuthMode != "auth-code" {
+	if cfg.TrinoAuthMode != config.AuthModeAuthCode {
 		return nil
 	}
 
@@ -48,51 +44,49 @@ func createAuthCodeTokenSource(cfg *config.TrinoConfig) oauth2TokenSource {
 
 	migrateLegacyCache(cachePath)
 
-	ts := &authCodeTokenSource{
+	conf := &oauth2.Config{
+		ClientID: cfg.TrinoOAuthClientID,
+		Scopes:   scopes,
+		Endpoint: oauth2.Endpoint{
+			AuthURL:   authorizeURL,
+			TokenURL:  cfg.TrinoOAuthTokenURL,
+			AuthStyle: oauth2.AuthStyleInParams, // public client, no secret
+		},
+	}
+
+	return &authCodeTokenSource{
 		oauthCacheHelper: oauthCacheHelper{
-			clientID:   cfg.TrinoOAuthClientID,
-			tokenURL:   cfg.TrinoOAuthTokenURL,
-			scopes:     scopes,
+			conf:       conf,
 			cachePath:  cachePath,
 			httpClient: &http.Client{Timeout: 30 * time.Second},
 		},
-		authorizeURL:  authorizeURL,
 		openBrowser:   openBrowserDefault,
 		serverTimeout: 120 * time.Second,
 	}
-	return ts
 }
 
-// deriveAuthorizeURL derives the authorization endpoint from the token URL
+// deriveAuthorizeURL derives the authorization endpoint from the token URL.
 func deriveAuthorizeURL(tokenURL string) string {
-	// Azure AD: replace /oauth2/v2.0/token with /oauth2/v2.0/authorize
-	if strings.Contains(tokenURL, "/oauth2/v2.0/token") {
-		return strings.Replace(tokenURL, "/oauth2/v2.0/token", "/oauth2/v2.0/authorize", 1)
-	}
-	// Generic: replace /token with /authorize
-	if strings.HasSuffix(tokenURL, "/token") {
-		return strings.TrimSuffix(tokenURL, "/token") + "/authorize"
+	if idx := len(tokenURL) - len("/token"); idx > 0 && tokenURL[idx:] == "/token" {
+		return tokenURL[:idx] + "/authorize"
 	}
 	return tokenURL + "/authorize"
 }
 
-// Token implements oauth2TokenSource
+// Token implements oauth2TokenSource.
 func (a *authCodeTokenSource) Token() (*oauth2Token, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Return valid in-memory token
 	if a.token != nil && a.token.Valid() {
 		return &oauth2Token{AccessToken: a.token.AccessToken}, nil
 	}
 
-	// Try disk cache
 	if cached := a.loadCacheShared(); cached != nil {
 		if cached.Valid() {
 			a.token = cached
 			return &oauth2Token{AccessToken: cached.AccessToken}, nil
 		}
-		// Refresh if possible
 		if cached.RefreshToken != "" {
 			refreshed, err := a.refreshTokenShared(cached.RefreshToken)
 			if err == nil {
@@ -104,7 +98,6 @@ func (a *authCodeTokenSource) Token() (*oauth2Token, error) {
 		}
 	}
 
-	// Do auth code + PKCE flow
 	token, err := a.doAuthCodeFlow()
 	if err != nil {
 		return nil, fmt.Errorf("authorization code authentication failed: %w", err)
@@ -114,22 +107,7 @@ func (a *authCodeTokenSource) Token() (*oauth2Token, error) {
 	return &oauth2Token{AccessToken: token.AccessToken}, nil
 }
 
-// generatePKCE creates a code verifier and its S256 challenge
-func generatePKCE() (verifier string, challenge string, err error) {
-	// 32 bytes = 43 base64url chars (RFC 7636 recommends 43-128)
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", "", fmt.Errorf("failed to generate PKCE verifier: %w", err)
-	}
-	verifier = base64.RawURLEncoding.EncodeToString(buf)
-
-	hash := sha256.Sum256([]byte(verifier))
-	challenge = base64.RawURLEncoding.EncodeToString(hash[:])
-
-	return verifier, challenge, nil
-}
-
-// generateState creates a random state parameter for CSRF protection
+// generateState creates a random state parameter for CSRF protection.
 func generateState() (string, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
@@ -138,19 +116,15 @@ func generateState() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// doAuthCodeFlow performs the full Authorization Code + PKCE flow
+// doAuthCodeFlow performs the full Authorization Code + PKCE flow.
 func (a *authCodeTokenSource) doAuthCodeFlow() (*oauth2.Token, error) {
-	verifier, challenge, err := generatePKCE()
-	if err != nil {
-		return nil, err
-	}
+	verifier := oauth2.GenerateVerifier()
 
 	state, err := generateState()
 	if err != nil {
 		return nil, err
 	}
 
-	// Start local callback server
 	codeChan := make(chan string, 1)
 	errChan := make(chan error, 1)
 
@@ -163,7 +137,6 @@ func (a *authCodeTokenSource) doAuthCodeFlow() (*oauth2.Token, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		// Validate state
 		if r.URL.Query().Get("state") != state {
 			errChan <- fmt.Errorf("state mismatch: possible CSRF attack")
 			http.Error(w, "State mismatch", http.StatusBadRequest)
@@ -205,19 +178,14 @@ func (a *authCodeTokenSource) doAuthCodeFlow() (*oauth2.Token, error) {
 		}
 	}()
 
-	// Build authorization URL
-	params := url.Values{
-		"client_id":             {a.clientID},
-		"response_type":         {"code"},
-		"redirect_uri":          {redirectURI},
-		"scope":                 {strings.Join(a.scopes, " ")},
-		"state":                 {state},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-	}
-	authURL := a.authorizeURL + "?" + params.Encode()
+	// shallow copy so RedirectURL is set per-call without mutating the shared conf
+	conf := *a.conf
+	conf.RedirectURL = redirectURI
+	authURL := conf.AuthCodeURL(state,
+		oauth2.S256ChallengeOption(verifier),
+		oauth2.AccessTypeOffline,
+	)
 
-	// Open browser
 	_, _ = fmt.Fprintf(os.Stderr, "\nOpening browser for authentication...\n")
 	_, _ = fmt.Fprintf(os.Stderr, "If the browser doesn't open, visit:\n%s\n\n", authURL)
 
@@ -225,11 +193,16 @@ func (a *authCodeTokenSource) doAuthCodeFlow() (*oauth2.Token, error) {
 		log.Printf("WARNING: Could not open browser: %v", err)
 	}
 
-	// Wait for callback
 	select {
 	case code := <-codeChan:
 		_, _ = fmt.Fprintf(os.Stderr, "Authorization code received, exchanging for token...\n")
-		return a.exchangeCode(code, verifier, redirectURI)
+		ctx := context.WithValue(context.Background(), oauth2.HTTPClient, a.httpClient)
+		tok, err := conf.Exchange(ctx, code, oauth2.VerifierOption(verifier))
+		if err != nil {
+			return nil, fmt.Errorf("token exchange failed: %w", err)
+		}
+		_, _ = fmt.Fprintf(os.Stderr, "Authentication successful!\n\n")
+		return tok, nil
 	case err := <-errChan:
 		return nil, err
 	case <-time.After(a.serverTimeout):
@@ -237,41 +210,7 @@ func (a *authCodeTokenSource) doAuthCodeFlow() (*oauth2.Token, error) {
 	}
 }
 
-// exchangeCode exchanges an authorization code for tokens
-func (a *authCodeTokenSource) exchangeCode(code, verifier, redirectURI string) (*oauth2.Token, error) {
-	data := url.Values{
-		"client_id":     {a.clientID},
-		"grant_type":    {"authorization_code"},
-		"code":          {code},
-		"redirect_uri":  {redirectURI},
-		"code_verifier": {verifier},
-	}
-
-	tokenResp, err := a.doTokenRequestShared(data)
-	if err != nil {
-		return nil, fmt.Errorf("token exchange failed: %w", err)
-	}
-
-	if tokenResp.AccessToken == "" {
-		return nil, fmt.Errorf("empty access token in exchange response")
-	}
-
-	expiresIn := tokenResp.ExpiresIn
-	if expiresIn < minTokenExpiry {
-		expiresIn = minTokenExpiry
-	}
-
-	_, _ = fmt.Fprintf(os.Stderr, "Authentication successful!\n\n")
-
-	return &oauth2.Token{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		TokenType:    tokenResp.TokenType,
-		Expiry:       time.Now().Add(time.Duration(expiresIn) * time.Second),
-	}, nil
-}
-
-// openBrowserDefault opens the URL in the user's default browser
+// openBrowserDefault opens the URL in the user's default browser.
 func openBrowserDefault(url string) error {
 	switch runtime.GOOS {
 	case "windows":

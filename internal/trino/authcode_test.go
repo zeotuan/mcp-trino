@@ -2,7 +2,6 @@ package trino
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +13,13 @@ import (
 	"time"
 
 	"github.com/tuannvm/mcp-trino/internal/config"
+	"golang.org/x/oauth2"
 )
+
+func jsonResponse(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
 
 func TestDeriveAuthorizeURL(t *testing.T) {
 	tests := []struct {
@@ -48,35 +53,6 @@ func TestDeriveAuthorizeURL(t *testing.T) {
 	}
 }
 
-func TestGeneratePKCE(t *testing.T) {
-	verifier, challenge, err := generatePKCE()
-	if err != nil {
-		t.Fatalf("generatePKCE() failed: %v", err)
-	}
-
-	// RFC 7636: verifier must be 43-128 chars
-	if len(verifier) < 43 || len(verifier) > 128 {
-		t.Errorf("verifier length %d, want 43-128", len(verifier))
-	}
-
-	// Challenge must be non-empty and different from verifier
-	if challenge == "" {
-		t.Error("challenge is empty")
-	}
-	if challenge == verifier {
-		t.Error("challenge should not equal verifier")
-	}
-
-	// Two calls should produce different values (randomness)
-	v2, c2, _ := generatePKCE()
-	if v2 == verifier {
-		t.Error("two calls should produce different verifiers")
-	}
-	if c2 == challenge {
-		t.Error("two calls should produce different challenges")
-	}
-}
-
 func TestGenerateState(t *testing.T) {
 	state1, err := generateState()
 	if err != nil {
@@ -94,7 +70,7 @@ func TestGenerateState(t *testing.T) {
 
 func TestCreateAuthCodeTokenSource(t *testing.T) {
 	cfg := &config.TrinoConfig{
-		TrinoAuthMode:      "auth-code",
+		TrinoAuthMode:      config.AuthModeAuthCode,
 		TrinoOAuthTokenURL: "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
 		TrinoOAuthClientID: "test-client-id",
 		TrinoOAuthScopes:   "openid,profile,offline_access",
@@ -109,14 +85,14 @@ func TestCreateAuthCodeTokenSource(t *testing.T) {
 	if !ok {
 		t.Fatal("Expected *authCodeTokenSource")
 	}
-	if ats.clientID != "test-client-id" {
-		t.Errorf("clientID = %q", ats.clientID)
+	if ats.conf.ClientID != "test-client-id" {
+		t.Errorf("ClientID = %q", ats.conf.ClientID)
 	}
-	if ats.authorizeURL != "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize" {
-		t.Errorf("authorizeURL = %q", ats.authorizeURL)
+	if ats.conf.Endpoint.AuthURL != "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize" {
+		t.Errorf("AuthURL = %q", ats.conf.Endpoint.AuthURL)
 	}
-	if len(ats.scopes) != 3 {
-		t.Errorf("scopes = %v, want 3 items", ats.scopes)
+	if len(ats.conf.Scopes) != 3 {
+		t.Errorf("Scopes = %v, want 3 items", ats.conf.Scopes)
 	}
 	if !strings.Contains(ats.cachePath, "token-cache-") {
 		t.Errorf("cachePath should be scoped, got %q", ats.cachePath)
@@ -124,7 +100,7 @@ func TestCreateAuthCodeTokenSource(t *testing.T) {
 }
 
 func TestCreateAuthCodeTokenSource_WrongMode(t *testing.T) {
-	cfg := &config.TrinoConfig{TrinoAuthMode: "basic"}
+	cfg := &config.TrinoConfig{TrinoAuthMode: config.AuthModeBasic}
 	if ts := createAuthCodeTokenSource(cfg); ts != nil {
 		t.Error("Expected nil for basic mode")
 	}
@@ -145,7 +121,7 @@ func TestAuthCodeTokenSource_CachedValidToken(t *testing.T) {
 
 	ts := &authCodeTokenSource{
 		oauthCacheHelper: oauthCacheHelper{
-			clientID:  "test",
+			conf:      &oauth2.Config{},
 			cachePath: cachePath,
 		},
 	}
@@ -166,7 +142,7 @@ func TestAuthCodeTokenSource_RefreshExpiredCache(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		if r.Form.Get("grant_type") == "refresh_token" {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			jsonResponse(w, map[string]interface{}{
 				"access_token":  "refreshed-auth-code-token",
 				"refresh_token": "new-refresh",
 				"token_type":    "Bearer",
@@ -189,9 +165,14 @@ func TestAuthCodeTokenSource_RefreshExpiredCache(t *testing.T) {
 
 	ts := &authCodeTokenSource{
 		oauthCacheHelper: oauthCacheHelper{
-			clientID:   "test",
-			tokenURL:   server.URL,
-			scopes:     []string{"openid"},
+			conf: &oauth2.Config{
+				ClientID: "test",
+				Scopes:   []string{"openid"},
+				Endpoint: oauth2.Endpoint{
+					TokenURL:  server.URL,
+					AuthStyle: oauth2.AuthStyleInParams,
+				},
+			},
 			cachePath:  cachePath,
 			httpClient: server.Client(),
 		},
@@ -210,13 +191,15 @@ func TestAuthCodeRefreshToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		if r.Form.Get("refresh_token") != "good-refresh" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error":             "invalid_grant",
 				"error_description": "bad refresh",
 			})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		jsonResponse(w, map[string]interface{}{
 			"access_token":  "new-token",
 			"refresh_token": "new-refresh",
 			"token_type":    "Bearer",
@@ -227,9 +210,14 @@ func TestAuthCodeRefreshToken(t *testing.T) {
 
 	ts := &authCodeTokenSource{
 		oauthCacheHelper: oauthCacheHelper{
-			clientID:   "test",
-			tokenURL:   server.URL,
-			scopes:     []string{"openid"},
+			conf: &oauth2.Config{
+				ClientID: "test",
+				Scopes:   []string{"openid"},
+				Endpoint: oauth2.Endpoint{
+					TokenURL:  server.URL,
+					AuthStyle: oauth2.AuthStyleInParams,
+				},
+			},
 			httpClient: server.Client(),
 		},
 	}
@@ -243,95 +231,18 @@ func TestAuthCodeRefreshToken(t *testing.T) {
 		t.Errorf("AccessToken = %q", token.AccessToken)
 	}
 
-	// Bad refresh — structured error
+	// Bad refresh — server returns 400 with error JSON
 	_, err = ts.refreshTokenShared("bad-refresh")
 	if err == nil {
-		t.Fatal("Expected error")
-	}
-	var oauthErr *oauthError
-	if !errors.As(err, &oauthErr) {
-		t.Fatalf("Expected *oauthError, got %T: %v", err, err)
-	}
-}
-
-func TestAuthCodeExchangeCode(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
-		if r.Form.Get("grant_type") != "authorization_code" {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		if r.Form.Get("code") != "test-auth-code" {
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "invalid_grant",
-			})
-			return
-		}
-		// Verify PKCE verifier is sent
-		if r.Form.Get("code_verifier") == "" {
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "invalid_request", "error_description": "missing code_verifier",
-			})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token":  "exchanged-token",
-			"refresh_token": "exchanged-refresh",
-			"token_type":    "Bearer",
-			"expires_in":    3600,
-		})
-	}))
-	defer server.Close()
-
-	ts := &authCodeTokenSource{
-		oauthCacheHelper: oauthCacheHelper{
-			clientID:   "test",
-			tokenURL:   server.URL,
-			httpClient: server.Client(),
-		},
-	}
-
-	token, err := ts.exchangeCode("test-auth-code", "test-verifier", "http://localhost:9999/callback")
-	if err != nil {
-		t.Fatalf("exchangeCode() failed: %v", err)
-	}
-	if token.AccessToken != "exchanged-token" {
-		t.Errorf("AccessToken = %q", token.AccessToken)
-	}
-	if token.RefreshToken != "exchanged-refresh" {
-		t.Errorf("RefreshToken = %q", token.RefreshToken)
-	}
-}
-
-func TestAuthCodeDoTokenRequest_ServerError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("<html>error</html>"))
-	}))
-	defer server.Close()
-
-	ts := &authCodeTokenSource{
-		oauthCacheHelper: oauthCacheHelper{
-			tokenURL:   server.URL,
-			httpClient: server.Client(),
-		},
-	}
-
-	_, err := ts.doTokenRequestShared(nil)
-	if err == nil {
-		t.Fatal("Expected error")
-	}
-	if !strings.Contains(err.Error(), "HTTP 500") {
-		t.Errorf("Error should mention HTTP 500: %v", err)
+		t.Fatal("Expected error for bad refresh token")
 	}
 }
 
 func TestAuthCodeFullFlow(t *testing.T) {
-	// Mock token server
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		if r.Form.Get("grant_type") == "authorization_code" {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			jsonResponse(w, map[string]interface{}{
 				"access_token":  "flow-access-token",
 				"refresh_token": "flow-refresh-token",
 				"token_type":    "Bearer",
@@ -346,20 +257,24 @@ func TestAuthCodeFullFlow(t *testing.T) {
 	tmpDir := t.TempDir()
 	cachePath := filepath.Join(tmpDir, "token-cache.json")
 
-	// Capture the auth URL to extract the callback port and state
 	var capturedURL string
 	ts := &authCodeTokenSource{
 		oauthCacheHelper: oauthCacheHelper{
-			clientID:   "test-client",
-			tokenURL:   tokenServer.URL,
-			scopes:     []string{"openid"},
+			conf: &oauth2.Config{
+				ClientID: "test-client",
+				Scopes:   []string{"openid"},
+				Endpoint: oauth2.Endpoint{
+					AuthURL:   "https://auth.example.com/authorize",
+					TokenURL:  tokenServer.URL,
+					AuthStyle: oauth2.AuthStyleInParams,
+				},
+			},
 			cachePath:  cachePath,
 			httpClient: tokenServer.Client(),
 		},
-		authorizeURL: "https://auth.example.com/authorize",
-		openBrowser: func(url string) error {
-			capturedURL = url
-			parsed, _ := parseAuthURL(url)
+		openBrowser: func(u string) error {
+			capturedURL = u
+			parsed, _ := parseAuthURL(u)
 			go func() {
 				time.Sleep(50 * time.Millisecond)
 				callbackURL := fmt.Sprintf("%s?code=mock-auth-code&state=%s", parsed.redirectURI, parsed.state)
@@ -404,7 +319,7 @@ func TestAuthCodeFullFlow(t *testing.T) {
 	}
 }
 
-// parseAuthURL is a test helper to extract params from the authorization URL
+// parseAuthURL is a test helper to extract params from the authorization URL.
 type authURLParams struct {
 	state       string
 	redirectURI string
@@ -423,7 +338,7 @@ func parseAuthURL(rawURL string) (authURLParams, error) {
 
 func TestAuthCodeCallbackStateMismatch(t *testing.T) {
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		jsonResponse(w, map[string]interface{}{
 			"access_token": "should-not-get-here",
 			"token_type":   "Bearer",
 			"expires_in":   3600,
@@ -433,14 +348,19 @@ func TestAuthCodeCallbackStateMismatch(t *testing.T) {
 
 	ts := &authCodeTokenSource{
 		oauthCacheHelper: oauthCacheHelper{
-			clientID:   "test",
-			tokenURL:   tokenServer.URL,
-			scopes:     []string{"openid"},
+			conf: &oauth2.Config{
+				ClientID: "test",
+				Scopes:   []string{"openid"},
+				Endpoint: oauth2.Endpoint{
+					AuthURL:   "https://auth.example.com/authorize",
+					TokenURL:  tokenServer.URL,
+					AuthStyle: oauth2.AuthStyleInParams,
+				},
+			},
 			httpClient: tokenServer.Client(),
 		},
-		authorizeURL: "https://auth.example.com/authorize",
-		openBrowser: func(url string) error {
-			parsed, _ := parseAuthURL(url)
+		openBrowser: func(u string) error {
+			parsed, _ := parseAuthURL(u)
 			go func() {
 				time.Sleep(50 * time.Millisecond)
 				callbackURL := fmt.Sprintf("%s?code=mock-code&state=WRONG-STATE", parsed.redirectURI)
@@ -473,7 +393,7 @@ func TestBuildDSN_AuthCodeMode(t *testing.T) {
 		Schema:        "prod",
 		Scheme:        "https",
 		SSL:           true,
-		TrinoAuthMode: "auth-code",
+		TrinoAuthMode: config.AuthModeAuthCode,
 	}
 
 	dsn := buildDSN(cfg)

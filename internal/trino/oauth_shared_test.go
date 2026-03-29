@@ -2,7 +2,6 @@ package trino
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -102,22 +101,6 @@ func TestMigrateLegacyCache(t *testing.T) {
 	}
 }
 
-func TestOAuthError(t *testing.T) {
-	err := &oauthError{Code: "authorization_pending", Description: "user hasn't authenticated yet"}
-	if err.Error() != "authorization_pending: user hasn't authenticated yet" {
-		t.Errorf("Error() = %q", err.Error())
-	}
-
-	var wrapped error = err
-	var target *oauthError
-	if !errors.As(wrapped, &target) {
-		t.Error("errors.As should match *oauthError")
-	}
-	if target.Code != "authorization_pending" {
-		t.Errorf("Code = %q", target.Code)
-	}
-}
-
 func TestTokenCacheLoadSave(t *testing.T) {
 	tmpDir := t.TempDir()
 	cachePath := filepath.Join(tmpDir, "token-cache.json")
@@ -181,37 +164,11 @@ func TestTokenCacheExpired(t *testing.T) {
 	}
 }
 
-func TestDoTokenRequestShared_OAuthError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error":             "authorization_pending",
-			"error_description": "user hasn't authenticated",
-		})
-	}))
-	defer server.Close()
-
-	h := &oauthCacheHelper{
-		tokenURL:   server.URL,
-		httpClient: server.Client(),
-	}
-
-	_, err := h.doTokenRequestShared(nil)
-	if err == nil {
-		t.Fatal("Expected error")
-	}
-	var oauthErr *oauthError
-	if !errors.As(err, &oauthErr) {
-		t.Fatalf("Expected *oauthError, got %T: %v", err, err)
-	}
-	if oauthErr.Code != "authorization_pending" {
-		t.Errorf("Code = %q", oauthErr.Code)
-	}
-}
-
 func TestRefreshTokenShared_PreservesRefreshToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
+		// Return access token without a new refresh token
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": "new-access",
 			"token_type":   "Bearer",
@@ -221,8 +178,13 @@ func TestRefreshTokenShared_PreservesRefreshToken(t *testing.T) {
 	defer server.Close()
 
 	h := &oauthCacheHelper{
-		clientID:   "test",
-		tokenURL:   server.URL,
+		conf: &oauth2.Config{
+			ClientID: "test",
+			Endpoint: oauth2.Endpoint{
+				TokenURL:  server.URL,
+				AuthStyle: oauth2.AuthStyleInParams,
+			},
+		},
 		httpClient: server.Client(),
 	}
 
@@ -230,24 +192,34 @@ func TestRefreshTokenShared_PreservesRefreshToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refreshTokenShared() failed: %v", err)
 	}
+	if token.AccessToken != "new-access" {
+		t.Errorf("AccessToken = %q, want 'new-access'", token.AccessToken)
+	}
+	// When server omits refresh_token, original should be preserved.
 	if token.RefreshToken != "original-refresh-token" {
 		t.Errorf("Should preserve original refresh token, got %q", token.RefreshToken)
 	}
 }
 
-func TestRefreshTokenShared_MinExpiry(t *testing.T) {
+func TestRefreshTokenShared_ZeroExpiry(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Respond with no expires_in — server omits it
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": "test-token",
 			"token_type":   "Bearer",
-			"expires_in":   0,
 		})
 	}))
 	defer server.Close()
 
 	h := &oauthCacheHelper{
-		clientID:   "test",
-		tokenURL:   server.URL,
+		conf: &oauth2.Config{
+			ClientID: "test",
+			Endpoint: oauth2.Endpoint{
+				TokenURL:  server.URL,
+				AuthStyle: oauth2.AuthStyleInParams,
+			},
+		},
 		httpClient: server.Client(),
 	}
 
@@ -255,7 +227,8 @@ func TestRefreshTokenShared_MinExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refreshTokenShared() failed: %v", err)
 	}
-	if time.Until(token.Expiry) < time.Duration(minTokenExpiry-5)*time.Second {
-		t.Errorf("Token expiry too soon: %v (expected at least %ds)", token.Expiry, minTokenExpiry)
+	// When expires_in is omitted, Expiry is zero — treated as never-expiring.
+	if !token.Valid() {
+		t.Error("Token with zero expiry should be valid (never expires)")
 	}
 }

@@ -1,14 +1,13 @@
 package trino
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,37 +24,11 @@ type tokenCache struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 }
 
-// oauthError is a structured error from the OAuth token endpoint.
-type oauthError struct {
-	Code        string
-	Description string
-}
-
-func (e *oauthError) Error() string {
-	return e.Code + ": " + e.Description
-}
-
-// tokenResponse is the shared JSON structure for token endpoint responses.
-type tokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	TokenType    string `json:"token_type"`
-	ExpiresIn    int    `json:"expires_in"`
-	Error        string `json:"error"`
-	ErrorDesc    string `json:"error_description"`
-}
-
-// minTokenExpiry is the minimum token lifetime to prevent refresh storms.
-const minTokenExpiry = 60 // seconds
-
-// oauthCacheHelper provides shared token cache and refresh logic
-// for the interactive auth-code flow and shared refresh-token caching.
+// oauthCacheHelper provides disk token cache and refresh logic.
 type oauthCacheHelper struct {
-	clientID   string
-	tokenURL   string
-	scopes     []string
-	cachePath  string
+	conf       *oauth2.Config
 	httpClient *http.Client
+	cachePath  string
 }
 
 // parseScopes splits a comma-separated scope string into trimmed tokens.
@@ -120,76 +93,22 @@ func migrateLegacyCache(scopedPath string) {
 	}
 }
 
-// doTokenRequestShared sends a POST to the token endpoint and parses the response
-func (h *oauthCacheHelper) doTokenRequestShared(data url.Values) (*tokenResponse, error) {
-	resp, err := h.httpClient.PostForm(h.tokenURL, data)
-	if err != nil {
-		return nil, fmt.Errorf("token request failed: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("WARNING: Failed to close token response body: %v", err)
-		}
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read token response: %w", err)
-	}
-
-	if resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("token endpoint returned HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var tokenResp tokenResponse
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("token endpoint returned non-JSON response (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-
-	if tokenResp.Error != "" {
-		return nil, &oauthError{Code: tokenResp.Error, Description: tokenResp.ErrorDesc}
-	}
-
-	return &tokenResp, nil
-}
-
-// refreshTokenShared uses a refresh token to get a new access token
+// refreshTokenShared uses a refresh token to obtain a new access token via the oauth2 library.
 func (h *oauthCacheHelper) refreshTokenShared(refreshTok string) (*oauth2.Token, error) {
-	data := url.Values{
-		"client_id":     {h.clientID},
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {refreshTok},
-		"scope":         {strings.Join(h.scopes, " ")},
-	}
-
-	tokenResp, err := h.doTokenRequestShared(data)
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, h.httpClient)
+	ts := h.conf.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshTok})
+	tok, err := ts.Token()
 	if err != nil {
-		return nil, fmt.Errorf("refresh failed: %w", err)
+		return nil, fmt.Errorf("token refresh failed: %w", err)
 	}
-
-	if tokenResp.AccessToken == "" {
-		return nil, fmt.Errorf("refresh failed: server returned empty access token")
+	// Preserve the original refresh token if the server didn't issue a new one.
+	if tok.RefreshToken == "" {
+		tok.RefreshToken = refreshTok
 	}
-
-	rt := tokenResp.RefreshToken
-	if rt == "" {
-		rt = refreshTok
-	}
-
-	expiresIn := tokenResp.ExpiresIn
-	if expiresIn < minTokenExpiry {
-		expiresIn = minTokenExpiry
-	}
-
-	return &oauth2.Token{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: rt,
-		TokenType:    tokenResp.TokenType,
-		Expiry:       time.Now().Add(time.Duration(expiresIn) * time.Second),
-	}, nil
+	return tok, nil
 }
 
-// loadCacheShared loads the cached token from disk
+// loadCacheShared loads the cached token from disk.
 func (h *oauthCacheHelper) loadCacheShared() *oauth2.Token {
 	if h.cachePath == "" {
 		return nil
@@ -213,7 +132,7 @@ func (h *oauthCacheHelper) loadCacheShared() *oauth2.Token {
 	}
 }
 
-// saveCacheShared saves the token to disk cache
+// saveCacheShared saves the token to disk cache.
 func (h *oauthCacheHelper) saveCacheShared(token *oauth2.Token) {
 	if h.cachePath == "" || token == nil {
 		return

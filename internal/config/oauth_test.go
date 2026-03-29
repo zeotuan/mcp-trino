@@ -155,27 +155,27 @@ func TestTrinoAuthModeConfiguration(t *testing.T) {
 	tests := []struct {
 		name             string
 		authMode         string
-		expectedAuthMode string
+		expectedAuthMode AuthMode
 	}{
 		{
 			name:             "Default auth mode is basic",
 			authMode:         "",
-			expectedAuthMode: "basic",
+			expectedAuthMode: AuthModeBasic,
 		},
 		{
 			name:             "Explicit basic mode",
 			authMode:         "basic",
-			expectedAuthMode: "basic",
+			expectedAuthMode: AuthModeBasic,
 		},
 		{
 			name:             "Authorization code mode",
 			authMode:         "auth-code",
-			expectedAuthMode: "auth-code",
+			expectedAuthMode: AuthModeAuthCode,
 		},
 		{
 			name:             "Case insensitive",
 			authMode:         "Auth-Code",
-			expectedAuthMode: "auth-code",
+			expectedAuthMode: AuthModeAuthCode,
 		},
 	}
 
@@ -187,7 +187,7 @@ func TestTrinoAuthModeConfiguration(t *testing.T) {
 			} else {
 				_ = os.Setenv("TRINO_AUTH_MODE", tt.authMode)
 			}
-			if tt.expectedAuthMode == "auth-code" {
+			if tt.expectedAuthMode == AuthModeAuthCode {
 				_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", "https://login.microsoftonline.com/tenant/oauth2/v2.0/token")
 				_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", "test-client-id")
 				_ = os.Setenv("TRINO_OAUTH_SCOPES", "openid,offline_access")
@@ -290,7 +290,7 @@ func TestTrinoOAuthBasicModeNoValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Basic mode should not require OAuth fields, got error: %v", err)
 	}
-	if config.TrinoAuthMode != "basic" {
+	if config.TrinoAuthMode != AuthModeBasic {
 		t.Errorf("TrinoAuthMode = %q, expected 'basic'", config.TrinoAuthMode)
 	}
 }

@@ -9,6 +9,19 @@ import (
 	"time"
 )
 
+// AuthMode represents how mcp-trino authenticates to the Trino server.
+type AuthMode string
+
+const (
+	// AuthModeBasic uses username and password. Works in any deployment.
+	AuthModeBasic AuthMode = "basic"
+
+	// AuthModeAuthCode uses PKCE browser redirect with cached tokens.
+	// LOCAL DEPLOYMENT ONLY — opens a browser on the host where mcp-trino runs.
+	// Not suitable for remote or shared deployments.
+	AuthModeAuthCode AuthMode = "auth-code"
+)
+
 // TrinoConfig holds Trino connection parameters
 type TrinoConfig struct {
 	// Basic connection parameters
@@ -50,11 +63,10 @@ type TrinoConfig struct {
 	// Query attribution
 	TrinoSource string // Value for X-Trino-Source header (identifies query source to Trino)
 
-	// Trino connection auth mode: "basic" (user/password) or "auth-code" (PKCE)
-	TrinoAuthMode      string // Auth mode for Trino connection
-	TrinoOAuthTokenURL string // OAuth token endpoint (e.g. https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token)
-	TrinoOAuthClientID string // OAuth client ID for auth-code flow
-	TrinoOAuthScopes   string // Comma-separated OAuth scopes
+	TrinoAuthMode      AuthMode // Auth mode for Trino connection: AuthModeBasic or AuthModeAuthCode (local only)
+	TrinoOAuthTokenURL string   // OAuth token endpoint (e.g. https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token)
+	TrinoOAuthClientID string   // OAuth client ID for auth-code flow
+	TrinoOAuthScopes   string   // Comma-separated OAuth scopes
 }
 
 // NewTrinoConfig creates a new TrinoConfig with values from environment variables or defaults
@@ -138,29 +150,33 @@ func NewTrinoConfigWithVersion(version string) (*TrinoConfig, error) {
 		trinoSource = fmt.Sprintf("mcp-trino/%s", version)
 	}
 
-	// Parse Trino auth mode.
-	trinoAuthMode := strings.ToLower(getEnv("TRINO_AUTH_MODE", "basic"))
+	trinoAuthMode := AuthMode(strings.ToLower(getEnv("TRINO_AUTH_MODE", "basic")))
 	if trinoAuthMode == "" {
-		trinoAuthMode = "basic"
+		trinoAuthMode = AuthModeBasic
 	}
 	trinoOAuthTokenURL := getEnv("TRINO_OAUTH_TOKEN_URL", "")
 	trinoOAuthClientID := getEnv("TRINO_OAUTH_CLIENT_ID", "")
 	trinoOAuthScopes := getEnv("TRINO_OAUTH_SCOPES", "")
 
-	// Validate auth mode
-	validAuthModes := map[string]bool{"basic": true, "auth-code": true}
+	validAuthModes := map[AuthMode]bool{AuthModeBasic: true, AuthModeAuthCode: true}
 	if !validAuthModes[trinoAuthMode] {
 		return nil, fmt.Errorf("invalid TRINO_AUTH_MODE '%s'. Supported modes: basic, auth-code", trinoAuthMode)
 	}
 
-	if trinoAuthMode == "auth-code" {
+	if trinoAuthMode == AuthModeAuthCode {
 		if trinoOAuthTokenURL == "" {
 			return nil, fmt.Errorf("TRINO_OAUTH_TOKEN_URL is required when TRINO_AUTH_MODE=auth-code")
 		}
 		if trinoOAuthClientID == "" {
 			return nil, fmt.Errorf("TRINO_OAUTH_CLIENT_ID is required when TRINO_AUTH_MODE=auth-code")
 		}
-		log.Printf("INFO: Trino auth mode: auth-code (browser redirect + PKCE, cached tokens)")
+		if strings.EqualFold(getEnv("MCP_TRANSPORT", "stdio"), "http") {
+			log.Println("WARNING: TRINO_AUTH_MODE=auth-code is designed for LOCAL deployments only " +
+				"(STDIO / Claude Desktop). It opens a browser on the host where mcp-trino runs. " +
+				"MCP_TRANSPORT=http suggests a remote deployment — auth-code will not work correctly. " +
+				"Use TRINO_AUTH_MODE=basic for remote deployments.")
+		}
+		log.Printf("INFO: Trino auth mode: auth-code (browser PKCE, LOCAL deployment only, tokens cached)")
 		log.Printf("INFO: Trino OAuth token URL: %s", trinoOAuthTokenURL)
 	} else {
 		log.Printf("INFO: Trino auth mode: basic (user/password)")
