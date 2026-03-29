@@ -481,10 +481,10 @@ func TestPrecompiledRegexConsistency(t *testing.T) {
 		{"REVOKE SELECT ON t FROM user1", false},
 
 		// Edge cases
-		{"SELECT*FROM users", true},       // word boundary handles this
-		{"SHOWTABLES", false},               // word boundary blocks
+		{"SELECT*FROM users", true},           // word boundary handles this
+		{"SHOWTABLES", false},                 // word boundary blocks
 		{"SELECT 1; DROP TABLE users", false}, // semicolon blocked
-		{"\n  SELECT * FROM t\n", true},    // newlines normalized
+		{"\n  SELECT * FROM t\n", true},       // newlines normalized
 	}
 
 	for _, tt := range queries {
@@ -630,10 +630,10 @@ func TestGetQueryUsername(t *testing.T) {
 
 func TestHeaderRoundTripper_BearerTokenInjection(t *testing.T) {
 	tests := []struct {
-		name           string
-		tokenSource    oauth2TokenSource
-		expectedAuth   string
-		expectNoAuth   bool
+		name         string
+		tokenSource  oauth2TokenSource
+		expectedAuth string
+		expectNoAuth bool
 	}{
 		{
 			name:         "Injects bearer token when TokenSource is set",
@@ -641,8 +641,8 @@ func TestHeaderRoundTripper_BearerTokenInjection(t *testing.T) {
 			expectedAuth: "Bearer test-access-token-123",
 		},
 		{
-			name:        "No auth header when TokenSource is nil",
-			tokenSource: nil,
+			name:         "No auth header when TokenSource is nil",
+			tokenSource:  nil,
 			expectNoAuth: true,
 		},
 		{
@@ -704,36 +704,6 @@ func TestHeaderRoundTripper_BearerTokenError(t *testing.T) {
 	}
 }
 
-func TestBuildDSN_OAuthMode(t *testing.T) {
-	cfg := &config.TrinoConfig{
-		Host:          "trino.example.com",
-		Port:          443,
-		User:          "service-account",
-		Password:      "should-be-ignored",
-		Catalog:       "hive",
-		Schema:        "default",
-		Scheme:        "https",
-		SSL:           true,
-		SSLInsecure:   false,
-		TrinoAuthMode: "oauth",
-	}
-
-	dsn := buildDSN(cfg)
-
-	// OAuth mode: DSN should NOT contain password
-	if strings.Contains(dsn, "should-be-ignored") {
-		t.Error("OAuth mode DSN should not contain password")
-	}
-	// Should still contain the host
-	if !strings.Contains(dsn, "trino.example.com") {
-		t.Error("DSN should contain host")
-	}
-	// Should contain SSL params
-	if !strings.Contains(dsn, "SSL=true") {
-		t.Error("DSN should contain SSL=true")
-	}
-}
-
 func TestBuildDSN_BasicMode(t *testing.T) {
 	cfg := &config.TrinoConfig{
 		Host:          "trino.example.com",
@@ -761,16 +731,15 @@ func TestBuildDSN_BasicMode(t *testing.T) {
 
 func TestCreateTokenSource(t *testing.T) {
 	cfg := &config.TrinoConfig{
-		TrinoAuthMode:        "oauth",
-		TrinoOAuthTokenURL:   "https://login.microsoftonline.com/test-tenant/oauth2/v2.0/token",
-		TrinoOAuthClientID:   "test-client-id",
-		TrinoOAuthClientSecret: "test-client-secret",
-		TrinoOAuthScopes:     "api://trino/.default,openid",
+		TrinoAuthMode:      "auth-code",
+		TrinoOAuthTokenURL: "https://login.microsoftonline.com/test-tenant/oauth2/v2.0/token",
+		TrinoOAuthClientID: "test-client-id",
+		TrinoOAuthScopes:   "api://trino/.default,openid",
 	}
 
 	ts := createTokenSource(cfg)
 	if ts == nil {
-		t.Fatal("Expected non-nil TokenSource for oauth config")
+		t.Fatal("Expected non-nil TokenSource for auth-code config")
 	}
 }
 
@@ -787,11 +756,10 @@ func TestCreateTokenSource_BasicMode(t *testing.T) {
 
 func TestCreateTokenSource_NoScopes(t *testing.T) {
 	cfg := &config.TrinoConfig{
-		TrinoAuthMode:        "oauth",
-		TrinoOAuthTokenURL:   "https://login.microsoftonline.com/test/oauth2/v2.0/token",
-		TrinoOAuthClientID:   "id",
-		TrinoOAuthClientSecret: "secret",
-		TrinoOAuthScopes:     "",
+		TrinoAuthMode:      "auth-code",
+		TrinoOAuthTokenURL: "https://login.microsoftonline.com/test/oauth2/v2.0/token",
+		TrinoOAuthClientID: "id",
+		TrinoOAuthScopes:   "",
 	}
 
 	ts := createTokenSource(cfg)

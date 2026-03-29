@@ -50,12 +50,11 @@ func createAuthCodeTokenSource(cfg *config.TrinoConfig) oauth2TokenSource {
 
 	ts := &authCodeTokenSource{
 		oauthCacheHelper: oauthCacheHelper{
-			clientID:     cfg.TrinoOAuthClientID,
-			clientSecret: cfg.TrinoOAuthClientSecret,
-			tokenURL:     cfg.TrinoOAuthTokenURL,
-			scopes:       scopes,
-			cachePath:    cachePath,
-			httpClient:   &http.Client{Timeout: 30 * time.Second},
+			clientID:   cfg.TrinoOAuthClientID,
+			tokenURL:   cfg.TrinoOAuthTokenURL,
+			scopes:     scopes,
+			cachePath:  cachePath,
+			httpClient: &http.Client{Timeout: 30 * time.Second},
 		},
 		authorizeURL:  authorizeURL,
 		openBrowser:   openBrowserDefault,
@@ -244,9 +243,6 @@ func (a *authCodeTokenSource) exchangeCode(code, verifier, redirectURI string) (
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
 		"code_verifier": {verifier},
-	}
-	if a.clientSecret != "" {
-		data.Set("client_secret", a.clientSecret)
 	}
 
 	tokenResp, err := a.doTokenRequestShared(data)

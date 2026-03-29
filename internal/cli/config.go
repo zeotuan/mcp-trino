@@ -21,12 +21,11 @@ type TrinoProfileConfig struct {
 		Enabled  *bool `yaml:"enabled"` // pointer to distinguish unset vs false
 		Insecure bool  `yaml:"insecure"`
 	} `yaml:"ssl"`
-	// OAuth client_credentials auth for Trino connection
-	AuthMode        string `yaml:"auth_mode,omitempty"`         // "basic" (default), "oauth", "device-code", or "auth-code"
-	OAuthTokenURL   string `yaml:"oauth_token_url,omitempty"`   // Token endpoint URL
-	OAuthClientID   string `yaml:"oauth_client_id,omitempty"`   // Client ID
-	OAuthClientSecret string `yaml:"oauth_client_secret,omitempty"` // Client secret
-	OAuthScopes     string `yaml:"oauth_scopes,omitempty"`      // Comma-separated scopes
+	// OAuth auth for Trino connection
+	AuthMode      string `yaml:"auth_mode,omitempty"`       // "basic" (default) or "auth-code"
+	OAuthTokenURL string `yaml:"oauth_token_url,omitempty"` // Token endpoint URL
+	OAuthClientID string `yaml:"oauth_client_id,omitempty"` // Client ID
+	OAuthScopes   string `yaml:"oauth_scopes,omitempty"`    // Comma-separated scopes
 }
 
 // CLIConfig represents the YAML configuration file structure
@@ -37,7 +36,7 @@ type CLIConfig struct {
 	// ConfigFileExists indicates whether the config was loaded from a real file
 	ConfigFileExists bool `yaml:"-"`
 
-	Current  string                       `yaml:"current"` // default profile name
+	Current  string                        `yaml:"current"` // default profile name
 	Profiles map[string]TrinoProfileConfig `yaml:"profiles"`
 	Output   struct {
 		Format string `yaml:"format"` // table, json, csv
@@ -378,7 +377,7 @@ func (c *CLIConfig) ApplyToEnv(profileName string) error {
 	}
 	// OAuth fields for Trino connection auth
 	// When a real config file is loaded, reset auth_mode to basic if profile doesn't specify it
-	// This prevents stale TRINO_AUTH_MODE=oauth from leaking across profile switches
+	// This prevents stale TRINO_AUTH_MODE values from leaking across profile switches
 	// But don't reset when using DefaultCLIConfig (no config file) — respect env vars
 	if profile.AuthMode != "" {
 		setEnvIfValue("TRINO_AUTH_MODE", profile.AuthMode)
@@ -386,17 +385,15 @@ func (c *CLIConfig) ApplyToEnv(profileName string) error {
 		// Only reset to basic when a real config file was loaded
 		_ = os.Setenv("TRINO_AUTH_MODE", "basic")
 	}
-	// Set OAuth fields from profile, or clear stale ones when switching to basic
-	if profile.AuthMode == "oauth" || profile.AuthMode == "device-code" || profile.AuthMode == "auth-code" {
-		setEnvIfValue("TRINO_OAUTH_TOKEN_URL", profile.OAuthTokenURL)
-		setEnvIfValue("TRINO_OAUTH_CLIENT_ID", profile.OAuthClientID)
-		setEnvIfValue("TRINO_OAUTH_CLIENT_SECRET", profile.OAuthClientSecret)
-		setEnvIfValue("TRINO_OAUTH_SCOPES", profile.OAuthScopes)
+	// Set auth-code fields from profile, or clear stale ones when switching to basic.
+	if profile.AuthMode == "auth-code" {
+		setOrUnsetEnv("TRINO_OAUTH_TOKEN_URL", profile.OAuthTokenURL)
+		setOrUnsetEnv("TRINO_OAUTH_CLIENT_ID", profile.OAuthClientID)
+		setOrUnsetEnv("TRINO_OAUTH_SCOPES", profile.OAuthScopes)
 	} else if c.ConfigFileExists {
-		// Clear stale OAuth env vars when switching to basic profile
+		// Clear stale auth env vars when switching to basic profile
 		_ = os.Unsetenv("TRINO_OAUTH_TOKEN_URL")
 		_ = os.Unsetenv("TRINO_OAUTH_CLIENT_ID")
-		_ = os.Unsetenv("TRINO_OAUTH_CLIENT_SECRET")
 		_ = os.Unsetenv("TRINO_OAUTH_SCOPES")
 	}
 	return nil
@@ -414,6 +411,15 @@ func (c *CLIConfig) GetOutputFormat() string {
 // This overrides any existing value, allowing profiles to take precedence over env vars
 func setEnvIfValue(key, value string) {
 	if value == "" {
+		return
+	}
+	_ = os.Setenv(key, value)
+}
+
+// setOrUnsetEnv sets a value when provided, otherwise clears any stale env var.
+func setOrUnsetEnv(key, value string) {
+	if value == "" {
+		_ = os.Unsetenv(key)
 		return
 	}
 	_ = os.Setenv(key, value)

@@ -121,7 +121,7 @@ func TestOAuthAllowedRedirectsConfiguration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_ = os.Setenv("OAUTH_ALLOWED_REDIRECT_URIS", tt.allowedRedirects)
 			_ = os.Setenv("OAUTH_ENABLED", "false") // Disable OAuth to avoid validation errors
-			_ = os.Setenv("OAUTH_MODE", "native") // Set explicit mode to avoid validation errors
+			_ = os.Setenv("OAUTH_MODE", "native")   // Set explicit mode to avoid validation errors
 
 			config, err := NewTrinoConfig()
 			if err != nil {
@@ -142,7 +142,6 @@ func TestTrinoAuthModeConfiguration(t *testing.T) {
 	origOAuthEnabled := os.Getenv("OAUTH_ENABLED")
 	origTokenURL := os.Getenv("TRINO_OAUTH_TOKEN_URL")
 	origClientID := os.Getenv("TRINO_OAUTH_CLIENT_ID")
-	origClientSecret := os.Getenv("TRINO_OAUTH_CLIENT_SECRET")
 	origScopes := os.Getenv("TRINO_OAUTH_SCOPES")
 
 	defer func() {
@@ -150,7 +149,6 @@ func TestTrinoAuthModeConfiguration(t *testing.T) {
 		_ = os.Setenv("OAUTH_ENABLED", origOAuthEnabled)
 		_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", origTokenURL)
 		_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", origClientID)
-		_ = os.Setenv("TRINO_OAUTH_CLIENT_SECRET", origClientSecret)
 		_ = os.Setenv("TRINO_OAUTH_SCOPES", origScopes)
 	}()
 
@@ -170,19 +168,14 @@ func TestTrinoAuthModeConfiguration(t *testing.T) {
 			expectedAuthMode: "basic",
 		},
 		{
-			name:             "OAuth mode",
-			authMode:         "oauth",
-			expectedAuthMode: "oauth",
+			name:             "Authorization code mode",
+			authMode:         "auth-code",
+			expectedAuthMode: "auth-code",
 		},
 		{
 			name:             "Case insensitive",
-			authMode:         "OAuth",
-			expectedAuthMode: "oauth",
-		},
-		{
-			name:             "Device code mode",
-			authMode:         "device-code",
-			expectedAuthMode: "device-code",
+			authMode:         "Auth-Code",
+			expectedAuthMode: "auth-code",
 		},
 	}
 
@@ -194,19 +187,14 @@ func TestTrinoAuthModeConfiguration(t *testing.T) {
 			} else {
 				_ = os.Setenv("TRINO_AUTH_MODE", tt.authMode)
 			}
-			// When oauth mode, provide required fields to avoid validation error
-			if tt.expectedAuthMode == "oauth" {
+			if tt.expectedAuthMode == "auth-code" {
 				_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", "https://login.microsoftonline.com/tenant/oauth2/v2.0/token")
 				_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", "test-client-id")
-				_ = os.Setenv("TRINO_OAUTH_CLIENT_SECRET", "test-secret")
-			} else if tt.expectedAuthMode == "device-code" {
-				_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", "https://login.microsoftonline.com/tenant/oauth2/v2.0/token")
-				_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", "test-client-id")
-				_ = os.Unsetenv("TRINO_OAUTH_CLIENT_SECRET")
+				_ = os.Setenv("TRINO_OAUTH_SCOPES", "openid,offline_access")
 			} else {
 				_ = os.Unsetenv("TRINO_OAUTH_TOKEN_URL")
 				_ = os.Unsetenv("TRINO_OAUTH_CLIENT_ID")
-				_ = os.Unsetenv("TRINO_OAUTH_CLIENT_SECRET")
+				_ = os.Unsetenv("TRINO_OAUTH_SCOPES")
 			}
 
 			config, err := NewTrinoConfig()
@@ -221,12 +209,11 @@ func TestTrinoAuthModeConfiguration(t *testing.T) {
 	}
 }
 
-func TestTrinoOAuthFieldsParsing(t *testing.T) {
+func TestTrinoAuthCodeFieldsParsing(t *testing.T) {
 	origAuthMode := os.Getenv("TRINO_AUTH_MODE")
 	origOAuthEnabled := os.Getenv("OAUTH_ENABLED")
 	origTokenURL := os.Getenv("TRINO_OAUTH_TOKEN_URL")
 	origClientID := os.Getenv("TRINO_OAUTH_CLIENT_ID")
-	origClientSecret := os.Getenv("TRINO_OAUTH_CLIENT_SECRET")
 	origScopes := os.Getenv("TRINO_OAUTH_SCOPES")
 
 	defer func() {
@@ -234,15 +221,13 @@ func TestTrinoOAuthFieldsParsing(t *testing.T) {
 		_ = os.Setenv("OAUTH_ENABLED", origOAuthEnabled)
 		_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", origTokenURL)
 		_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", origClientID)
-		_ = os.Setenv("TRINO_OAUTH_CLIENT_SECRET", origClientSecret)
 		_ = os.Setenv("TRINO_OAUTH_SCOPES", origScopes)
 	}()
 
 	_ = os.Setenv("OAUTH_ENABLED", "false")
-	_ = os.Setenv("TRINO_AUTH_MODE", "oauth")
+	_ = os.Setenv("TRINO_AUTH_MODE", "auth-code")
 	_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", "https://login.microsoftonline.com/my-tenant/oauth2/v2.0/token")
 	_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", "my-client-id")
-	_ = os.Setenv("TRINO_OAUTH_CLIENT_SECRET", "my-client-secret")
 	_ = os.Setenv("TRINO_OAUTH_SCOPES", "api://trino/.default,openid")
 
 	config, err := NewTrinoConfig()
@@ -256,79 +241,8 @@ func TestTrinoOAuthFieldsParsing(t *testing.T) {
 	if config.TrinoOAuthClientID != "my-client-id" {
 		t.Errorf("TrinoOAuthClientID = %q", config.TrinoOAuthClientID)
 	}
-	if config.TrinoOAuthClientSecret != "my-client-secret" {
-		t.Errorf("TrinoOAuthClientSecret = %q", config.TrinoOAuthClientSecret)
-	}
 	if config.TrinoOAuthScopes != "api://trino/.default,openid" {
 		t.Errorf("TrinoOAuthScopes = %q", config.TrinoOAuthScopes)
-	}
-}
-
-func TestTrinoOAuthValidation_MissingFields(t *testing.T) {
-	origAuthMode := os.Getenv("TRINO_AUTH_MODE")
-	origOAuthEnabled := os.Getenv("OAUTH_ENABLED")
-	origTokenURL := os.Getenv("TRINO_OAUTH_TOKEN_URL")
-	origClientID := os.Getenv("TRINO_OAUTH_CLIENT_ID")
-	origClientSecret := os.Getenv("TRINO_OAUTH_CLIENT_SECRET")
-	origScopes := os.Getenv("TRINO_OAUTH_SCOPES")
-
-	defer func() {
-		_ = os.Setenv("TRINO_AUTH_MODE", origAuthMode)
-		_ = os.Setenv("OAUTH_ENABLED", origOAuthEnabled)
-		_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", origTokenURL)
-		_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", origClientID)
-		_ = os.Setenv("TRINO_OAUTH_CLIENT_SECRET", origClientSecret)
-		_ = os.Setenv("TRINO_OAUTH_SCOPES", origScopes)
-	}()
-
-	_ = os.Setenv("OAUTH_ENABLED", "false")
-
-	tests := []struct {
-		name         string
-		tokenURL     string
-		clientID     string
-		clientSecret string
-		expectErr    string
-	}{
-		{
-			name:         "Missing token URL",
-			tokenURL:     "",
-			clientID:     "my-id",
-			clientSecret: "my-secret",
-			expectErr:    "TRINO_OAUTH_TOKEN_URL is required",
-		},
-		{
-			name:         "Missing client ID",
-			tokenURL:     "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
-			clientID:     "",
-			clientSecret: "my-secret",
-			expectErr:    "TRINO_OAUTH_CLIENT_ID is required",
-		},
-		{
-			name:         "Missing client secret",
-			tokenURL:     "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
-			clientID:     "my-id",
-			clientSecret: "",
-			expectErr:    "TRINO_OAUTH_CLIENT_SECRET is required",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_ = os.Setenv("TRINO_AUTH_MODE", "oauth")
-			setOrUnset("TRINO_OAUTH_TOKEN_URL", tt.tokenURL)
-			setOrUnset("TRINO_OAUTH_CLIENT_ID", tt.clientID)
-			setOrUnset("TRINO_OAUTH_CLIENT_SECRET", tt.clientSecret)
-			_ = os.Unsetenv("TRINO_OAUTH_SCOPES")
-
-			_, err := NewTrinoConfig()
-			if err == nil {
-				t.Fatal("Expected error but got nil")
-			}
-			if !strings.Contains(err.Error(), tt.expectErr) {
-				t.Errorf("Error = %q, expected to contain %q", err.Error(), tt.expectErr)
-			}
-		})
 	}
 }
 
@@ -359,21 +273,18 @@ func TestTrinoOAuthBasicModeNoValidation(t *testing.T) {
 	origOAuthEnabled := os.Getenv("OAUTH_ENABLED")
 	origTokenURL := os.Getenv("TRINO_OAUTH_TOKEN_URL")
 	origClientID := os.Getenv("TRINO_OAUTH_CLIENT_ID")
-	origClientSecret := os.Getenv("TRINO_OAUTH_CLIENT_SECRET")
 
 	defer func() {
 		_ = os.Setenv("TRINO_AUTH_MODE", origAuthMode)
 		_ = os.Setenv("OAUTH_ENABLED", origOAuthEnabled)
 		_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", origTokenURL)
 		_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", origClientID)
-		_ = os.Setenv("TRINO_OAUTH_CLIENT_SECRET", origClientSecret)
 	}()
 
 	_ = os.Setenv("OAUTH_ENABLED", "false")
 	_ = os.Setenv("TRINO_AUTH_MODE", "basic")
 	_ = os.Unsetenv("TRINO_OAUTH_TOKEN_URL")
 	_ = os.Unsetenv("TRINO_OAUTH_CLIENT_ID")
-	_ = os.Unsetenv("TRINO_OAUTH_CLIENT_SECRET")
 
 	config, err := NewTrinoConfig()
 	if err != nil {
@@ -420,7 +331,7 @@ func TestOAuthProxyModeValidation(t *testing.T) {
 	_ = os.Setenv("OAUTH_PROVIDER", "okta")
 	_ = os.Setenv("OIDC_ISSUER", "https://dev.okta.com")
 	_ = os.Setenv("OIDC_AUDIENCE", "https://example.com")
-	_ = os.Setenv("OIDC_CLIENT_SECRET", "")  // Missing client secret
+	_ = os.Setenv("OIDC_CLIENT_SECRET", "")          // Missing client secret
 	_ = os.Setenv("OAUTH_ALLOWED_REDIRECT_URIS", "") // Missing allowed redirects
 
 	config, err := NewTrinoConfig()
@@ -438,23 +349,20 @@ func TestOAuthProxyModeValidation(t *testing.T) {
 	}
 }
 
-func TestTrinoDeviceCodeValidation_MissingFields(t *testing.T) {
+func TestTrinoAuthCodeValidation_MissingFields(t *testing.T) {
 	origAuthMode := os.Getenv("TRINO_AUTH_MODE")
 	origOAuthEnabled := os.Getenv("OAUTH_ENABLED")
 	origTokenURL := os.Getenv("TRINO_OAUTH_TOKEN_URL")
 	origClientID := os.Getenv("TRINO_OAUTH_CLIENT_ID")
-	origClientSecret := os.Getenv("TRINO_OAUTH_CLIENT_SECRET")
 
 	defer func() {
 		_ = os.Setenv("TRINO_AUTH_MODE", origAuthMode)
 		_ = os.Setenv("OAUTH_ENABLED", origOAuthEnabled)
 		_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", origTokenURL)
 		_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", origClientID)
-		_ = os.Setenv("TRINO_OAUTH_CLIENT_SECRET", origClientSecret)
 	}()
 
 	_ = os.Setenv("OAUTH_ENABLED", "false")
-	_ = os.Unsetenv("TRINO_OAUTH_CLIENT_SECRET")
 
 	tests := []struct {
 		name      string
@@ -463,22 +371,22 @@ func TestTrinoDeviceCodeValidation_MissingFields(t *testing.T) {
 		expectErr string
 	}{
 		{
-			name:      "Missing token URL for device-code",
+			name:      "Missing token URL for auth-code",
 			tokenURL:  "",
 			clientID:  "my-id",
-			expectErr: "TRINO_OAUTH_TOKEN_URL is required when TRINO_AUTH_MODE=device-code",
+			expectErr: "TRINO_OAUTH_TOKEN_URL is required when TRINO_AUTH_MODE=auth-code",
 		},
 		{
-			name:      "Missing client ID for device-code",
+			name:      "Missing client ID for auth-code",
 			tokenURL:  "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
 			clientID:  "",
-			expectErr: "TRINO_OAUTH_CLIENT_ID is required when TRINO_AUTH_MODE=device-code",
+			expectErr: "TRINO_OAUTH_CLIENT_ID is required when TRINO_AUTH_MODE=auth-code",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_ = os.Setenv("TRINO_AUTH_MODE", "device-code")
+			_ = os.Setenv("TRINO_AUTH_MODE", "auth-code")
 			setOrUnset("TRINO_OAUTH_TOKEN_URL", tt.tokenURL)
 			setOrUnset("TRINO_OAUTH_CLIENT_ID", tt.clientID)
 
@@ -490,36 +398,5 @@ func TestTrinoDeviceCodeValidation_MissingFields(t *testing.T) {
 				t.Errorf("Error = %q, expected to contain %q", err.Error(), tt.expectErr)
 			}
 		})
-	}
-}
-
-func TestTrinoDeviceCodeNoSecretRequired(t *testing.T) {
-	origAuthMode := os.Getenv("TRINO_AUTH_MODE")
-	origOAuthEnabled := os.Getenv("OAUTH_ENABLED")
-	origTokenURL := os.Getenv("TRINO_OAUTH_TOKEN_URL")
-	origClientID := os.Getenv("TRINO_OAUTH_CLIENT_ID")
-	origClientSecret := os.Getenv("TRINO_OAUTH_CLIENT_SECRET")
-
-	defer func() {
-		_ = os.Setenv("TRINO_AUTH_MODE", origAuthMode)
-		_ = os.Setenv("OAUTH_ENABLED", origOAuthEnabled)
-		_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", origTokenURL)
-		_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", origClientID)
-		_ = os.Setenv("TRINO_OAUTH_CLIENT_SECRET", origClientSecret)
-	}()
-
-	// device-code should NOT require client_secret (public clients)
-	_ = os.Setenv("OAUTH_ENABLED", "false")
-	_ = os.Setenv("TRINO_AUTH_MODE", "device-code")
-	_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", "https://login.microsoftonline.com/tenant/oauth2/v2.0/token")
-	_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", "my-client-id")
-	_ = os.Unsetenv("TRINO_OAUTH_CLIENT_SECRET")
-
-	config, err := NewTrinoConfig()
-	if err != nil {
-		t.Fatalf("device-code should not require client_secret, got: %v", err)
-	}
-	if config.TrinoAuthMode != "device-code" {
-		t.Errorf("TrinoAuthMode = %q, want 'device-code'", config.TrinoAuthMode)
 	}
 }

@@ -93,17 +93,6 @@ OAuth 2.1 authentication is provided by the external **[oauth-mcp-proxy](https:/
 - **Providers**: HMAC, Okta, Google, Azure AD
 - **Documentation**: See [docs/oauth.md](docs/oauth.md) and [oauth-mcp-proxy docs](https://github.com/tuannvm/oauth-mcp-proxy#readme)
 
-### Trino Connection OAuth
-
-For Trino servers that require OAuth/JWT bearer tokens (Azure AD, Okta, etc.):
-- **Auth Modes**: `TRINO_AUTH_MODE` supports `basic` (default), `oauth` (client_credentials), `device-code` (Device Authorization Grant), `auth-code` (Authorization Code + PKCE)
-- **Token Injection**: `internal/trino/client.go` - `headerRoundTripper` injects `Authorization: Bearer` header
-- **oauth**: Machine-to-machine via `golang.org/x/oauth2/clientcredentials` — requires `TRINO_OAUTH_CLIENT_SECRET`
-- **device-code**: User authenticates via code displayed in terminal — public client, no secret needed
-- **auth-code**: Browser auto-opens for login with PKCE — public client, no secret needed
-- **Config**: `TRINO_OAUTH_TOKEN_URL`, `TRINO_OAUTH_CLIENT_ID`, `TRINO_OAUTH_SCOPES` (all modes); `TRINO_OAUTH_CLIENT_SECRET` (only client_credentials)
-- **CLI Profiles**: Profiles in `~/.config/trino/config.yaml` support `auth_mode`, `oauth_token_url`, etc.
-
 ### Transport Support
 
 - **STDIO Transport**: Direct MCP client integration (default)
@@ -134,13 +123,6 @@ All tools return JSON-formatted responses and handle parameter validation:
 - `TRINO_SCHEME` (http/https), `TRINO_SSL`, `TRINO_SSL_INSECURE`
 - `TRINO_ALLOW_WRITE_QUERIES` (default: false for security)
 - `TRINO_QUERY_TIMEOUT` (default: 30 seconds, validated > 0)
-
-**Trino Connection OAuth:**
-- `TRINO_AUTH_MODE` (basic/oauth/device-code/auth-code, default: basic) - Auth mode for Trino connection
-- `TRINO_OAUTH_TOKEN_URL` - Token endpoint (required for all OAuth modes)
-- `TRINO_OAUTH_CLIENT_ID` - OAuth client ID (required for all OAuth modes)
-- `TRINO_OAUTH_CLIENT_SECRET` - OAuth client secret (only required for `oauth` client_credentials mode)
-- `TRINO_OAUTH_SCOPES` - Comma-separated scopes (required for device-code/auth-code; optional for oauth)
 
 **MCP Server:**
 - `MCP_TRANSPORT` (stdio/http), `MCP_PORT` (default: 8080), `MCP_HOST`

@@ -1,6 +1,8 @@
 package trino
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,15 +17,107 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// tokenCache represents cached OAuth tokens on disk.
+type tokenCache struct {
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token"`
+	TokenType    string    `json:"token_type"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+// oauthError is a structured error from the OAuth token endpoint.
+type oauthError struct {
+	Code        string
+	Description string
+}
+
+func (e *oauthError) Error() string {
+	return e.Code + ": " + e.Description
+}
+
+// tokenResponse is the shared JSON structure for token endpoint responses.
+type tokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	Error        string `json:"error"`
+	ErrorDesc    string `json:"error_description"`
+}
+
+// minTokenExpiry is the minimum token lifetime to prevent refresh storms.
+const minTokenExpiry = 60 // seconds
+
 // oauthCacheHelper provides shared token cache and refresh logic
-// for both device-code and auth-code flows
+// for the interactive auth-code flow and shared refresh-token caching.
 type oauthCacheHelper struct {
-	clientID     string
-	clientSecret string
-	tokenURL     string
-	scopes       []string
-	cachePath    string
-	httpClient   *http.Client
+	clientID   string
+	tokenURL   string
+	scopes     []string
+	cachePath  string
+	httpClient *http.Client
+}
+
+// parseScopes splits a comma-separated scope string into trimmed tokens.
+func parseScopes(csv string) []string {
+	if csv == "" {
+		return nil
+	}
+	parts := strings.Split(csv, ",")
+	scopes := make([]string, 0, len(parts))
+	for _, s := range parts {
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			scopes = append(scopes, trimmed)
+		}
+	}
+	return scopes
+}
+
+// scopedCachePath returns a token cache path scoped to a specific tokenURL+clientID.
+func scopedCachePath(tokenURL, clientID string) string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("WARNING: Could not determine home directory; token caching disabled")
+		return ""
+	}
+	hash := sha256.Sum256([]byte(tokenURL + "|" + clientID))
+	filename := fmt.Sprintf("token-cache-%s.json", hex.EncodeToString(hash[:8]))
+	return filepath.Join(homeDir, ".config", "trino", filename)
+}
+
+// defaultCachePath returns the default unscoped token cache path used for migration.
+func defaultCachePath() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(homeDir, ".config", "trino", "token-cache.json")
+}
+
+// migrateLegacyCache copies the legacy unscoped token cache to the scoped path if needed.
+func migrateLegacyCache(scopedPath string) {
+	if scopedPath == "" {
+		return
+	}
+	if _, err := os.Stat(scopedPath); err == nil {
+		return
+	}
+	legacyPath := defaultCachePath()
+	if legacyPath == "" {
+		return
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		return
+	}
+	data, err := os.ReadFile(legacyPath)
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(scopedPath)
+	_ = os.MkdirAll(dir, 0700)
+	if err := os.WriteFile(scopedPath, data, 0600); err == nil {
+		log.Printf("Migrated legacy token cache to %s", filepath.Base(scopedPath))
+	}
 }
 
 // doTokenRequestShared sends a POST to the token endpoint and parses the response
@@ -62,9 +156,6 @@ func (h *oauthCacheHelper) refreshTokenShared(refreshTok string) (*oauth2.Token,
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refreshTok},
 		"scope":         {strings.Join(h.scopes, " ")},
-	}
-	if h.clientSecret != "" {
-		data.Set("client_secret", h.clientSecret)
 	}
 
 	tokenResp, err := h.doTokenRequestShared(data)

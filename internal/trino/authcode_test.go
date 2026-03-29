@@ -128,11 +128,6 @@ func TestCreateAuthCodeTokenSource_WrongMode(t *testing.T) {
 	if ts := createAuthCodeTokenSource(cfg); ts != nil {
 		t.Error("Expected nil for basic mode")
 	}
-
-	cfg2 := &config.TrinoConfig{TrinoAuthMode: "device-code"}
-	if ts := createAuthCodeTokenSource(cfg2); ts != nil {
-		t.Error("Expected nil for device-code mode")
-	}
 }
 
 func TestAuthCodeTokenSource_CachedValidToken(t *testing.T) {

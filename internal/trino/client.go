@@ -14,8 +14,6 @@ import (
 	"github.com/trinodb/trino-go-client/trino"
 	"github.com/tuannvm/mcp-trino/internal/config"
 	oauth "github.com/tuannvm/oauth-mcp-proxy"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/clientcredentials"
 )
 
 // Pre-compiled regexes for read-only query detection
@@ -45,7 +43,7 @@ var (
 	}
 
 	// Pre-compiled write operation patterns
-	writeOpPatterns     []*regexp.Regexp
+	writeOpPatterns      []*regexp.Regexp
 	writeOpsExceptCreate []*regexp.Regexp
 
 	// Pre-compiled sanitization patterns
@@ -95,65 +93,20 @@ type oauth2TokenSource interface {
 	Token() (*oauth2Token, error)
 }
 
-// realTokenSource wraps golang.org/x/oauth2.TokenSource
-type realTokenSource struct {
-	source oauth2.TokenSource
-}
-
-func (r *realTokenSource) Token() (*oauth2Token, error) {
-	tok, err := r.source.Token()
-	if err != nil {
-		return nil, err
-	}
-	return &oauth2Token{AccessToken: tok.AccessToken}, nil
-}
-
 // createTokenSource creates an oauth2TokenSource from config (nil for basic auth)
 func createTokenSource(cfg *config.TrinoConfig) oauth2TokenSource {
-	switch cfg.TrinoAuthMode {
-	case "oauth":
-		return createClientCredentialsTokenSource(cfg)
-	case "device-code":
-		return createDeviceCodeTokenSource(cfg)
-	case "auth-code":
+	if cfg.TrinoAuthMode == "auth-code" {
 		return createAuthCodeTokenSource(cfg)
-	default:
-		return nil
 	}
-}
-
-// createClientCredentialsTokenSource creates a client_credentials token source
-func createClientCredentialsTokenSource(cfg *config.TrinoConfig) oauth2TokenSource {
-
-	var scopes []string
-	if cfg.TrinoOAuthScopes != "" {
-		scopes = strings.Split(cfg.TrinoOAuthScopes, ",")
-		for i, s := range scopes {
-			scopes[i] = strings.TrimSpace(s)
-		}
-	}
-
-	ccConfig := &clientcredentials.Config{
-		ClientID:     cfg.TrinoOAuthClientID,
-		ClientSecret: cfg.TrinoOAuthClientSecret,
-		TokenURL:     cfg.TrinoOAuthTokenURL,
-		Scopes:       scopes,
-	}
-
-	// Use a timeout-bounded HTTP client for token requests to prevent hanging
-	// on unreachable token endpoints
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, httpClient)
-
-	return &realTokenSource{source: ccConfig.TokenSource(ctx)}
+	return nil
 }
 
 // buildDSN constructs the Trino DSN string from config
 func buildDSN(cfg *config.TrinoConfig) string {
 	var dsnURL url.URL
 
-	if cfg.TrinoAuthMode == "oauth" || cfg.TrinoAuthMode == "device-code" || cfg.TrinoAuthMode == "auth-code" {
-		// OAuth/device-code mode: no password in DSN, user is optional for attribution
+	if cfg.TrinoAuthMode == "auth-code" {
+		// OAuth mode: no password in DSN, user is optional for attribution
 		dsnURL = url.URL{
 			Scheme: cfg.Scheme,
 			User:   url.User(cfg.User),

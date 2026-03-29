@@ -532,7 +532,7 @@ func TestSetCurrent_NotFound(t *testing.T) {
 	}
 }
 
-func TestCLIProfileOAuthFields(t *testing.T) {
+func TestCLIProfileAuthCodeFields(t *testing.T) {
 	yaml := `
 current: prod
 profiles:
@@ -540,11 +540,10 @@ profiles:
     host: trino.example.com
     port: 443
     user: service-account
-    auth_mode: oauth
+    auth_mode: auth-code
     oauth_token_url: https://login.microsoftonline.com/tenant/oauth2/v2.0/token
     oauth_client_id: my-client-id
-    oauth_client_secret: my-secret
-    oauth_scopes: api://trino/.default
+    oauth_scopes: openid,offline_access
 `
 	cfg, err := ParseCLIConfig([]byte(yaml))
 	if err != nil {
@@ -556,8 +555,8 @@ profiles:
 		t.Fatalf("GetActiveProfile() failed: %v", err)
 	}
 
-	if profile.AuthMode != "oauth" {
-		t.Errorf("AuthMode = %q, want 'oauth'", profile.AuthMode)
+	if profile.AuthMode != "auth-code" {
+		t.Errorf("AuthMode = %q, want 'auth-code'", profile.AuthMode)
 	}
 	if profile.OAuthTokenURL != "https://login.microsoftonline.com/tenant/oauth2/v2.0/token" {
 		t.Errorf("OAuthTokenURL = %q", profile.OAuthTokenURL)
@@ -565,17 +564,14 @@ profiles:
 	if profile.OAuthClientID != "my-client-id" {
 		t.Errorf("OAuthClientID = %q", profile.OAuthClientID)
 	}
-	if profile.OAuthClientSecret != "my-secret" {
-		t.Errorf("OAuthClientSecret = %q", profile.OAuthClientSecret)
-	}
-	if profile.OAuthScopes != "api://trino/.default" {
+	if profile.OAuthScopes != "openid,offline_access" {
 		t.Errorf("OAuthScopes = %q", profile.OAuthScopes)
 	}
 }
 
-func TestCLIProfileOAuthApplyToEnv(t *testing.T) {
+func TestCLIProfileAuthCodeApplyToEnv(t *testing.T) {
 	// Save and restore env
-	envVars := []string{"TRINO_AUTH_MODE", "TRINO_OAUTH_TOKEN_URL", "TRINO_OAUTH_CLIENT_ID", "TRINO_OAUTH_CLIENT_SECRET", "TRINO_OAUTH_SCOPES"}
+	envVars := []string{"TRINO_AUTH_MODE", "TRINO_OAUTH_TOKEN_URL", "TRINO_OAUTH_CLIENT_ID", "TRINO_OAUTH_SCOPES"}
 	origVals := make(map[string]string)
 	for _, k := range envVars {
 		origVals[k] = os.Getenv(k)
@@ -588,17 +584,16 @@ func TestCLIProfileOAuthApplyToEnv(t *testing.T) {
 
 	cfg := &CLIConfig{
 		ConfigFileExists: true,
-		Current:          "oauth-profile",
+		Current:          "auth-code-profile",
 		Profiles: map[string]TrinoProfileConfig{
-			"oauth-profile": {
-				Host:              "trino.example.com",
-				Port:              443,
-				User:              "svc",
-				AuthMode:          "oauth",
-				OAuthTokenURL:     "https://login.microsoftonline.com/t/oauth2/v2.0/token",
-				OAuthClientID:     "cid",
-				OAuthClientSecret: "csec",
-				OAuthScopes:       "api://trino/.default",
+			"auth-code-profile": {
+				Host:          "trino.example.com",
+				Port:          443,
+				User:          "svc",
+				AuthMode:      "auth-code",
+				OAuthTokenURL: "https://login.microsoftonline.com/t/oauth2/v2.0/token",
+				OAuthClientID: "cid",
+				OAuthScopes:   "openid,offline_access",
 			},
 		},
 	}
@@ -608,8 +603,8 @@ func TestCLIProfileOAuthApplyToEnv(t *testing.T) {
 		t.Fatalf("ApplyToEnv() failed: %v", err)
 	}
 
-	if v := os.Getenv("TRINO_AUTH_MODE"); v != "oauth" {
-		t.Errorf("TRINO_AUTH_MODE = %q, want 'oauth'", v)
+	if v := os.Getenv("TRINO_AUTH_MODE"); v != "auth-code" {
+		t.Errorf("TRINO_AUTH_MODE = %q, want 'auth-code'", v)
 	}
 	if v := os.Getenv("TRINO_OAUTH_TOKEN_URL"); v != "https://login.microsoftonline.com/t/oauth2/v2.0/token" {
 		t.Errorf("TRINO_OAUTH_TOKEN_URL = %q", v)
@@ -617,17 +612,14 @@ func TestCLIProfileOAuthApplyToEnv(t *testing.T) {
 	if v := os.Getenv("TRINO_OAUTH_CLIENT_ID"); v != "cid" {
 		t.Errorf("TRINO_OAUTH_CLIENT_ID = %q", v)
 	}
-	if v := os.Getenv("TRINO_OAUTH_CLIENT_SECRET"); v != "csec" {
-		t.Errorf("TRINO_OAUTH_CLIENT_SECRET = %q", v)
-	}
-	if v := os.Getenv("TRINO_OAUTH_SCOPES"); v != "api://trino/.default" {
+	if v := os.Getenv("TRINO_OAUTH_SCOPES"); v != "openid,offline_access" {
 		t.Errorf("TRINO_OAUTH_SCOPES = %q", v)
 	}
 }
 
 func TestCLIProfileBasicOverridesStaleOAuth(t *testing.T) {
-	// Simulate: TRINO_AUTH_MODE=oauth was set by a previous profile or env
-	envVars := []string{"TRINO_AUTH_MODE", "TRINO_OAUTH_TOKEN_URL", "TRINO_OAUTH_CLIENT_ID", "TRINO_OAUTH_CLIENT_SECRET", "TRINO_OAUTH_SCOPES"}
+	// Simulate: TRINO_AUTH_MODE=auth-code was set by a previous profile or env
+	envVars := []string{"TRINO_AUTH_MODE", "TRINO_OAUTH_TOKEN_URL", "TRINO_OAUTH_CLIENT_ID", "TRINO_OAUTH_SCOPES"}
 	origVals := make(map[string]string)
 	for _, k := range envVars {
 		origVals[k] = os.Getenv(k)
@@ -639,10 +631,9 @@ func TestCLIProfileBasicOverridesStaleOAuth(t *testing.T) {
 	}()
 
 	// Pre-set stale OAuth env
-	_ = os.Setenv("TRINO_AUTH_MODE", "oauth")
+	_ = os.Setenv("TRINO_AUTH_MODE", "auth-code")
 	_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", "https://stale.example.com/token")
 	_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", "stale-client")
-	_ = os.Setenv("TRINO_OAUTH_CLIENT_SECRET", "stale-secret")
 	_ = os.Setenv("TRINO_OAUTH_SCOPES", "stale-scope")
 
 	// Apply a basic profile (no auth_mode set)
@@ -669,7 +660,7 @@ func TestCLIProfileBasicOverridesStaleOAuth(t *testing.T) {
 	}
 
 	// Stale OAuth env vars should be cleared when switching to basic
-	for _, key := range []string{"TRINO_OAUTH_TOKEN_URL", "TRINO_OAUTH_CLIENT_ID", "TRINO_OAUTH_CLIENT_SECRET", "TRINO_OAUTH_SCOPES"} {
+	for _, key := range []string{"TRINO_OAUTH_TOKEN_URL", "TRINO_OAUTH_CLIENT_ID", "TRINO_OAUTH_SCOPES"} {
 		if v := os.Getenv(key); v != "" {
 			t.Errorf("%s = %q, want empty (should be cleared on basic profile switch)", key, v)
 		}
@@ -677,7 +668,7 @@ func TestCLIProfileBasicOverridesStaleOAuth(t *testing.T) {
 }
 
 func TestApplyToEnv_ClearsStaleOAuthEnvVars(t *testing.T) {
-	envVars := []string{"TRINO_AUTH_MODE", "TRINO_OAUTH_TOKEN_URL", "TRINO_OAUTH_CLIENT_ID", "TRINO_OAUTH_CLIENT_SECRET", "TRINO_OAUTH_SCOPES"}
+	envVars := []string{"TRINO_AUTH_MODE", "TRINO_OAUTH_TOKEN_URL", "TRINO_OAUTH_CLIENT_ID", "TRINO_OAUTH_SCOPES"}
 	origVals := make(map[string]string)
 	for _, k := range envVars {
 		origVals[k] = os.Getenv(k)
@@ -688,11 +679,10 @@ func TestApplyToEnv_ClearsStaleOAuthEnvVars(t *testing.T) {
 		}
 	}()
 
-	// Pre-set stale OAuth env vars (simulating previous device-code session)
-	_ = os.Setenv("TRINO_AUTH_MODE", "device-code")
+	// Pre-set stale OAuth env vars (simulating previous auth-code session)
+	_ = os.Setenv("TRINO_AUTH_MODE", "auth-code")
 	_ = os.Setenv("TRINO_OAUTH_TOKEN_URL", "https://stale.example.com/token")
 	_ = os.Setenv("TRINO_OAUTH_CLIENT_ID", "stale-client-id")
-	_ = os.Setenv("TRINO_OAUTH_CLIENT_SECRET", "stale-secret")
 	_ = os.Setenv("TRINO_OAUTH_SCOPES", "stale-scope")
 
 	// Switch to a basic profile
@@ -718,7 +708,7 @@ func TestApplyToEnv_ClearsStaleOAuthEnvVars(t *testing.T) {
 		t.Errorf("TRINO_AUTH_MODE = %q, want 'basic'", v)
 	}
 	// All stale OAuth vars should be cleared
-	for _, key := range []string{"TRINO_OAUTH_TOKEN_URL", "TRINO_OAUTH_CLIENT_ID", "TRINO_OAUTH_CLIENT_SECRET", "TRINO_OAUTH_SCOPES"} {
+	for _, key := range []string{"TRINO_OAUTH_TOKEN_URL", "TRINO_OAUTH_CLIENT_ID", "TRINO_OAUTH_SCOPES"} {
 		if v := os.Getenv(key); v != "" {
 			t.Errorf("%s = %q, want empty (stale env var not cleared)", key, v)
 		}
