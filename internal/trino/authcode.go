@@ -174,7 +174,7 @@ func (a *authCodeTokenSource) doAuthCodeFlow() (*oauth2.Token, error) {
 			desc := r.URL.Query().Get("error_description")
 			errChan <- fmt.Errorf("authorization error: %s: %s", errMsg, desc)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprintf(w, "<html><body><h2>Authentication failed</h2><p>%s: %s</p><p>You can close this tab.</p></body></html>",
+			_, _ = fmt.Fprintf(w, "<html><body><h2>Authentication failed</h2><p>%s: %s</p><p>You can close this tab.</p></body></html>",
 				html.EscapeString(errMsg), html.EscapeString(desc))
 			return
 		}
@@ -187,7 +187,7 @@ func (a *authCodeTokenSource) doAuthCodeFlow() (*oauth2.Token, error) {
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, "<html><body><h2>Authentication successful!</h2><p>You can close this tab and return to the terminal.</p></body></html>")
+		_, _ = fmt.Fprintf(w, "<html><body><h2>Authentication successful!</h2><p>You can close this tab and return to the terminal.</p></body></html>")
 		codeChan <- code
 	})
 
@@ -200,7 +200,9 @@ func (a *authCodeTokenSource) doAuthCodeFlow() (*oauth2.Token, error) {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		srv.Shutdown(ctx)
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("WARNING: Failed to shut down auth callback server: %v", err)
+		}
 	}()
 
 	// Build authorization URL
@@ -216,8 +218,8 @@ func (a *authCodeTokenSource) doAuthCodeFlow() (*oauth2.Token, error) {
 	authURL := a.authorizeURL + "?" + params.Encode()
 
 	// Open browser
-	fmt.Fprintf(os.Stderr, "\nOpening browser for authentication...\n")
-	fmt.Fprintf(os.Stderr, "If the browser doesn't open, visit:\n%s\n\n", authURL)
+	_, _ = fmt.Fprintf(os.Stderr, "\nOpening browser for authentication...\n")
+	_, _ = fmt.Fprintf(os.Stderr, "If the browser doesn't open, visit:\n%s\n\n", authURL)
 
 	if err := a.openBrowser(authURL); err != nil {
 		log.Printf("WARNING: Could not open browser: %v", err)
@@ -226,7 +228,7 @@ func (a *authCodeTokenSource) doAuthCodeFlow() (*oauth2.Token, error) {
 	// Wait for callback
 	select {
 	case code := <-codeChan:
-		fmt.Fprintf(os.Stderr, "Authorization code received, exchanging for token...\n")
+		_, _ = fmt.Fprintf(os.Stderr, "Authorization code received, exchanging for token...\n")
 		return a.exchangeCode(code, verifier, redirectURI)
 	case err := <-errChan:
 		return nil, err
@@ -259,7 +261,7 @@ func (a *authCodeTokenSource) exchangeCode(code, verifier, redirectURI string) (
 		expiresIn = minTokenExpiry
 	}
 
-	fmt.Fprintf(os.Stderr, "Authentication successful!\n\n")
+	_, _ = fmt.Fprintf(os.Stderr, "Authentication successful!\n\n")
 
 	return &oauth2.Token{
 		AccessToken:  tokenResp.AccessToken,

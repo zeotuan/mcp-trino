@@ -184,7 +184,7 @@ func TestTokenCacheExpired(t *testing.T) {
 func TestDoTokenRequestShared_OAuthError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error":             "authorization_pending",
 			"error_description": "user hasn't authenticated",
 		})
@@ -212,7 +212,7 @@ func TestDoTokenRequestShared_OAuthError(t *testing.T) {
 func TestRefreshTokenShared_PreservesRefreshToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": "new-access",
 			"token_type":   "Bearer",
 			"expires_in":   3600,
@@ -237,7 +237,7 @@ func TestRefreshTokenShared_PreservesRefreshToken(t *testing.T) {
 
 func TestRefreshTokenShared_MinExpiry(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": "test-token",
 			"token_type":   "Bearer",
 			"expires_in":   0,

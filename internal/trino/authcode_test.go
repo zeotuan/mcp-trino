@@ -166,7 +166,7 @@ func TestAuthCodeTokenSource_RefreshExpiredCache(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		if r.Form.Get("grant_type") == "refresh_token" {
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"access_token":  "refreshed-auth-code-token",
 				"refresh_token": "new-refresh",
 				"token_type":    "Bearer",
@@ -210,13 +210,13 @@ func TestAuthCodeRefreshToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		if r.Form.Get("refresh_token") != "good-refresh" {
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error":             "invalid_grant",
 				"error_description": "bad refresh",
 			})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token":  "new-token",
 			"refresh_token": "new-refresh",
 			"token_type":    "Bearer",
@@ -262,19 +262,19 @@ func TestAuthCodeExchangeCode(t *testing.T) {
 			return
 		}
 		if r.Form.Get("code") != "test-auth-code" {
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error": "invalid_grant",
 			})
 			return
 		}
 		// Verify PKCE verifier is sent
 		if r.Form.Get("code_verifier") == "" {
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error": "invalid_request", "error_description": "missing code_verifier",
 			})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token":  "exchanged-token",
 			"refresh_token": "exchanged-refresh",
 			"token_type":    "Bearer",
@@ -306,7 +306,7 @@ func TestAuthCodeExchangeCode(t *testing.T) {
 func TestAuthCodeDoTokenRequest_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("<html>error</html>"))
+		_, _ = w.Write([]byte("<html>error</html>"))
 	}))
 	defer server.Close()
 
@@ -331,7 +331,7 @@ func TestAuthCodeFullFlow(t *testing.T) {
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		if r.Form.Get("grant_type") == "authorization_code" {
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"access_token":  "flow-access-token",
 				"refresh_token": "flow-refresh-token",
 				"token_type":    "Bearer",
@@ -363,7 +363,10 @@ func TestAuthCodeFullFlow(t *testing.T) {
 			go func() {
 				time.Sleep(50 * time.Millisecond)
 				callbackURL := fmt.Sprintf("%s?code=mock-auth-code&state=%s", parsed.redirectURI, parsed.state)
-				http.Get(callbackURL)
+				resp, err := http.Get(callbackURL)
+				if err == nil {
+					_ = resp.Body.Close()
+				}
 			}()
 			return nil
 		},
@@ -420,7 +423,7 @@ func parseAuthURL(rawURL string) (authURLParams, error) {
 
 func TestAuthCodeCallbackStateMismatch(t *testing.T) {
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": "should-not-get-here",
 			"token_type":   "Bearer",
 			"expires_in":   3600,
@@ -441,7 +444,10 @@ func TestAuthCodeCallbackStateMismatch(t *testing.T) {
 			go func() {
 				time.Sleep(50 * time.Millisecond)
 				callbackURL := fmt.Sprintf("%s?code=mock-code&state=WRONG-STATE", parsed.redirectURI)
-				http.Get(callbackURL)
+				resp, err := http.Get(callbackURL)
+				if err == nil {
+					_ = resp.Body.Close()
+				}
 			}()
 			return nil
 		},

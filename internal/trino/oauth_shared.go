@@ -126,7 +126,11 @@ func (h *oauthCacheHelper) doTokenRequestShared(data url.Values) (*tokenResponse
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("WARNING: Failed to close token response body: %v", err)
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
