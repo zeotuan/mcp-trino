@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,7 +80,7 @@ func createBearerTokenManager(cfg *config.TrinoConfig) bearerTokenManager {
 
 	return &externalAuthTokenManager{
 		cachePath:    externalTokenCachePath(cfg),
-		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		httpClient:   newExternalAuthHTTPClient(&http.Client{Timeout: 30 * time.Second}),
 		openBrowser:  openBrowserDefault,
 		pollInterval: 2 * time.Second,
 		pollTimeout:  2 * time.Minute,
@@ -180,10 +182,15 @@ func (m *externalAuthTokenManager) InvalidateToken() {
 	}
 }
 
-func parseBearerAuthChallenge(headers http.Header) (bearerAuthChallenge, error) {
+func parseBearerAuthChallenge(headers http.Header, requestURL *url.URL) (bearerAuthChallenge, error) {
 	values := headers.Values("WWW-Authenticate")
 	if len(values) == 0 {
 		return bearerAuthChallenge{}, fmt.Errorf("trino returned no WWW-Authenticate header")
+	}
+
+	trustedOrigin, err := normalizedOrigin(requestURL)
+	if err != nil {
+		return bearerAuthChallenge{}, fmt.Errorf("invalid Trino request URL for external auth challenge validation: %w", err)
 	}
 
 	joined := strings.Join(values, ", ")
@@ -194,16 +201,30 @@ func parseBearerAuthChallenge(headers http.Header) (bearerAuthChallenge, error) 
 		return bearerAuthChallenge{}, fmt.Errorf("no Trino external auth challenge found in WWW-Authenticate header")
 	}
 
+	tokenURL, err := validateTrustedAuthURL(tokenMatch[1], trustedOrigin, "x_token_server")
+	if err != nil {
+		return bearerAuthChallenge{}, err
+	}
+
 	challenge := bearerAuthChallenge{
-		TokenURL: tokenMatch[1],
+		TokenURL: tokenURL,
 	}
 	if len(redirectMatch) >= 2 {
-		challenge.RedirectURL = redirectMatch[1]
+		redirectURL, err := validateTrustedAuthURL(redirectMatch[1], trustedOrigin, "x_redirect_server")
+		if err != nil {
+			return bearerAuthChallenge{}, err
+		}
+		challenge.RedirectURL = redirectURL
 	}
 	return challenge, nil
 }
 
 func (m *externalAuthTokenManager) waitForToken(ctx context.Context, initialTokenURL string) (string, error) {
+	trustedOrigin, err := normalizedOriginFromRawURL(initialTokenURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid Trino external auth token URL %q: %w", initialTokenURL, err)
+	}
+
 	deadline := time.Now().Add(m.pollTimeout)
 	tokenURL := initialTokenURL
 
@@ -223,7 +244,7 @@ func (m *externalAuthTokenManager) waitForToken(ctx context.Context, initialToke
 		decodeErr := json.NewDecoder(resp.Body).Decode(&poll)
 		_ = resp.Body.Close()
 
-		if resp.StatusCode >= 400 {
+		if resp.StatusCode != http.StatusOK {
 			if decodeErr == nil && poll.Error != "" {
 				return "", fmt.Errorf("trino token polling failed: %s", poll.Error)
 			}
@@ -241,7 +262,11 @@ func (m *externalAuthTokenManager) waitForToken(ctx context.Context, initialToke
 			return "", fmt.Errorf("trino token polling failed: %s", poll.Error)
 		}
 		if poll.NextURI != "" {
-			tokenURL = poll.NextURI
+			nextTokenURL, err := validateTrustedAuthURL(poll.NextURI, trustedOrigin, "nextUri")
+			if err != nil {
+				return "", err
+			}
+			tokenURL = nextTokenURL
 		}
 
 		select {
@@ -328,4 +353,73 @@ func openBrowserDefault(targetURL string) error {
 	default:
 		return exec.Command("xdg-open", targetURL).Start()
 	}
+}
+
+func newExternalAuthHTTPClient(base *http.Client) *http.Client {
+	if base == nil {
+		base = &http.Client{}
+	}
+
+	client := *base
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &client
+}
+
+func normalizedOriginFromRawURL(rawURL string) (string, error) {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	return normalizedOrigin(parsedURL)
+}
+
+func normalizedOrigin(candidateURL *url.URL) (string, error) {
+	if candidateURL == nil {
+		return "", fmt.Errorf("missing URL")
+	}
+	if !candidateURL.IsAbs() {
+		return "", fmt.Errorf("URL %q is not absolute", candidateURL.String())
+	}
+
+	scheme := strings.ToLower(candidateURL.Scheme)
+	host := strings.TrimSuffix(strings.ToLower(candidateURL.Hostname()), ".")
+	if scheme == "" || host == "" {
+		return "", fmt.Errorf("URL %q must include scheme and host", candidateURL.String())
+	}
+
+	port := candidateURL.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		default:
+			return "", fmt.Errorf("unsupported URL scheme %q", candidateURL.Scheme)
+		}
+	}
+
+	return fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(host, port)), nil
+}
+
+func validateTrustedAuthURL(rawURL string, trustedOrigin string, fieldName string) (string, error) {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid %s URL %q: %w", fieldName, rawURL, err)
+	}
+	if parsedURL.User != nil {
+		return "", fmt.Errorf("invalid %s URL %q: user info is not allowed", fieldName, rawURL)
+	}
+
+	candidateOrigin, err := normalizedOrigin(parsedURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid %s URL %q: %w", fieldName, rawURL, err)
+	}
+	if candidateOrigin != trustedOrigin {
+		return "", fmt.Errorf("untrusted %s URL %q: expected origin %s", fieldName, rawURL, trustedOrigin)
+	}
+
+	return parsedURL.String(), nil
 }

@@ -151,7 +151,7 @@ func (t *headerRoundTripper) resolveChallenge(
 	resp *http.Response,
 ) (bearerAuthChallenge, *http.Response, error) {
 	for attempt := 0; attempt <= maxChallengeRetries; attempt++ {
-		challenge, err := parseBearerAuthChallenge(resp.Header)
+		challenge, err := parseBearerAuthChallenge(resp.Header, req.URL)
 		if err == nil {
 			return challenge, resp, nil
 		}
