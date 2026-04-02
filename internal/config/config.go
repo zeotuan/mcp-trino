@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tuannvm/mcp-trino/internal/netutil"
 )
 
 type AuthMode string
@@ -164,8 +166,16 @@ func NewTrinoConfigWithVersion(version string) (*TrinoConfig, error) {
 	switch authMode {
 	case AuthModeBasic:
 	case AuthModeExternalAuth:
-		if !strings.EqualFold(scheme, "https") {
-			return nil, fmt.Errorf("TRINO_AUTH_MODE=external requires TRINO_SCHEME=https; refusing cleartext HTTP")
+		host := getEnv("TRINO_HOST", "localhost")
+		switch {
+		case strings.EqualFold(scheme, "https"):
+		case strings.EqualFold(scheme, "http"):
+			if !netutil.IsLoopbackHost(host) {
+				return nil, fmt.Errorf("TRINO_AUTH_MODE=external requires TRINO_SCHEME=https unless TRINO_HOST is loopback; refusing cleartext HTTP for host %q", host)
+			}
+			log.Printf("WARNING: TRINO_AUTH_MODE=external over HTTP is allowed only for loopback host %q", host)
+		default:
+			return nil, fmt.Errorf("TRINO_AUTH_MODE=external requires TRINO_SCHEME to be https, or http only for loopback TRINO_HOST; got %q", scheme)
 		}
 		if strings.EqualFold(getEnv("MCP_TRANSPORT", "stdio"), "http") {
 			log.Println("WARNING: TRINO_AUTH_MODE=external is designed for local/browser-mediated use. " +
@@ -185,6 +195,8 @@ func NewTrinoConfigWithVersion(version string) (*TrinoConfig, error) {
 	// If using HTTPS, force SSL to true
 	if strings.EqualFold(scheme, "https") {
 		ssl = true
+	} else if strings.EqualFold(scheme, "http") {
+		ssl = false
 	}
 
 	// Log a warning if write queries are allowed
