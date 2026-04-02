@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -155,7 +156,9 @@ func (t *headerRoundTripper) resolveChallenge(
 		if err == nil {
 			return challenge, resp, nil
 		}
-		if sentToken == "" || attempt == maxChallengeRetries {
+		if sentToken == "" ||
+			attempt == maxChallengeRetries ||
+			(!errors.Is(err, errNoWWWAuthenticateHeader) && !errors.Is(err, errNoExternalAuthChallenge)) {
 			// Close the body: callers must not receive a non-nil resp alongside
 			// a non-nil err (RoundTripper contract).
 			_ = resp.Body.Close()

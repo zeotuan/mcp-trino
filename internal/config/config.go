@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
 	"github.com/tuannvm/mcp-trino/internal/secret"
 )
 
@@ -212,14 +211,9 @@ func NewTrinoConfigWithVersion(version string) (*TrinoConfig, error) {
 	switch authMode {
 	case AuthModeBasic:
 	case AuthModeExternalAuth:
-		if !strings.EqualFold(scheme, "https") {
-			return nil, fmt.Errorf("TRINO_AUTH_MODE=external requires TRINO_SCHEME=https; refusing cleartext HTTP")
+		if err := validateExternalAuthMode(scheme, getEnv("TRINO_HOST", "localhost"), getEnv("MCP_TRANSPORT", "stdio")); err != nil {
+			return nil, err
 		}
-		if strings.EqualFold(getEnv("MCP_TRANSPORT", "stdio"), "http") {
-			log.Println("WARNING: TRINO_AUTH_MODE=external is designed for local/browser-mediated use. " +
-				"MCP_TRANSPORT=http may not work correctly for shared or remote deployments.")
-		}
-		log.Println("INFO: Trino auth mode: external (Trino browser challenge with cached bearer token)")
 	}
 
 	// Validate allowlist formats
@@ -233,6 +227,8 @@ func NewTrinoConfigWithVersion(version string) (*TrinoConfig, error) {
 	// If using HTTPS, force SSL to true
 	if strings.EqualFold(scheme, "https") {
 		ssl = true
+	} else if strings.EqualFold(scheme, "http") {
+		ssl = false
 	}
 
 	// Log a warning if write queries are allowed

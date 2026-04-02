@@ -3,8 +3,10 @@ package trino
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -20,13 +22,29 @@ import (
 	"time"
 
 	"github.com/tuannvm/mcp-trino/internal/config"
+	"github.com/tuannvm/mcp-trino/internal/netutil"
 )
 
-const trinoAuthUserAgent = "mcp-trino-external-auth"
+const (
+	trinoAuthUserAgent         = "mcp-trino-external-auth"
+	externalAuthCleanupTimeout = 5 * time.Second
+)
 
 var (
 	redirectServerPattern = regexp.MustCompile(`x_redirect_server="([^"]+)"`)
 	tokenServerPattern    = regexp.MustCompile(`x_token_server="([^"]+)"`)
+)
+
+var (
+	errMissingExternalAuthTokenURL = errors.New("missing Trino external auth token URL")
+	errNoExternalAuthChallenge     = errors.New("no Trino external auth challenge found in WWW-Authenticate header")
+	errNoWWWAuthenticateHeader     = errors.New("trino returned no WWW-Authenticate header")
+	errExternalAuthInvalidURL      = errors.New("invalid external auth URL")
+	errExternalAuthInsecureURL     = errors.New("external auth URL must use https unless host is loopback")
+	errExternalAuthUntrustedURL    = errors.New("untrusted external auth URL")
+	errExternalAuthPollFailed      = errors.New("trino token polling failed")
+	errExternalAuthDecodeFailed    = errors.New("failed to decode Trino token response")
+	errExternalAuthPollTimedOut    = errors.New("timed out waiting for Trino access token")
 )
 
 type bearerTokenManager interface {
@@ -50,9 +68,10 @@ type externalAuthTokenManager struct {
 	pollInterval time.Duration
 	pollTimeout  time.Duration
 
-	mu         sync.Mutex
-	token      string
-	generation uint64 // incremented on each InvalidateToken to fence stale writes
+	mu             sync.Mutex
+	token          string
+	tokenExpiresAt time.Time
+	generation     uint64 // incremented on each InvalidateToken to fence stale writes
 
 	inFlight *tokenAcquisition
 }
@@ -64,13 +83,45 @@ type tokenAcquisition struct {
 }
 
 type externalTokenCache struct {
-	AccessToken string `json:"access_token"`
+	AccessToken string    `json:"access_token"`
+	ExpiresAt   time.Time `json:"expires_at,omitempty"`
 }
 
 type externalTokenPollResponse struct {
 	Token   string `json:"token"`
 	Error   string `json:"error"`
 	NextURI string `json:"nextUri"`
+}
+
+type externalAuthError struct {
+	Kind    error
+	Message string
+	Err     error
+}
+
+func (e *externalAuthError) Error() string {
+	switch {
+	case e == nil:
+		return ""
+	case e.Err != nil && e.Message != "":
+		return fmt.Sprintf("%s: %v", e.Message, e.Err)
+	case e.Err != nil:
+		return e.Err.Error()
+	case e.Message != "":
+		return e.Message
+	case e.Kind != nil:
+		return e.Kind.Error()
+	default:
+		return ""
+	}
+}
+
+func (e *externalAuthError) Unwrap() error {
+	return e.Err
+}
+
+func (e *externalAuthError) Is(target error) bool {
+	return target == e.Kind || (e.Err != nil && errors.Is(e.Err, target))
 }
 
 func createBearerTokenManager(cfg *config.TrinoConfig) bearerTokenManager {
@@ -110,11 +161,17 @@ func (m *externalAuthTokenManager) CurrentToken() string {
 // Must be called with m.mu held.
 func (m *externalAuthTokenManager) cachedTokenLocked() string {
 	if m.token != "" {
-		return m.token
+		if tokenExpired(m.tokenExpiresAt) {
+			m.token = ""
+			m.tokenExpiresAt = time.Time{}
+		} else {
+			return m.token
+		}
 	}
 
 	if cache := m.loadCache(); cache != nil {
 		m.token = cache.AccessToken
+		m.tokenExpiresAt = cache.ExpiresAt
 	}
 	return m.token
 }
@@ -142,7 +199,7 @@ func (m *externalAuthTokenManager) AcquireToken(ctx context.Context, challenge b
 
 	if challenge.TokenURL == "" {
 		m.mu.Unlock()
-		return "", fmt.Errorf("missing Trino external auth token URL")
+		return "", &externalAuthError{Kind: errMissingExternalAuthTokenURL, Message: errMissingExternalAuthTokenURL.Error()}
 	}
 
 	gen := m.generation
@@ -155,8 +212,13 @@ func (m *externalAuthTokenManager) AcquireToken(ctx context.Context, challenge b
 	m.mu.Lock()
 	// Only persist if no InvalidateToken call raced with our acquisition.
 	if err == nil && m.generation == gen {
+		expiresAt, _ := tokenExpiry(token)
 		m.token = token
-		m.saveCache(&externalTokenCache{AccessToken: token})
+		m.tokenExpiresAt = expiresAt
+		m.saveCache(&externalTokenCache{
+			AccessToken: token,
+			ExpiresAt:   expiresAt,
+		})
 	}
 	inFlight.token = token
 	inFlight.err = err
@@ -174,6 +236,7 @@ func (m *externalAuthTokenManager) InvalidateToken() {
 	defer m.mu.Unlock()
 
 	m.token = ""
+	m.tokenExpiresAt = time.Time{}
 	m.generation++
 	if m.cachePath != "" {
 		if err := os.Remove(m.cachePath); err != nil && !os.IsNotExist(err) {
@@ -185,12 +248,16 @@ func (m *externalAuthTokenManager) InvalidateToken() {
 func parseBearerAuthChallenge(headers http.Header, requestURL *url.URL) (bearerAuthChallenge, error) {
 	values := headers.Values("WWW-Authenticate")
 	if len(values) == 0 {
-		return bearerAuthChallenge{}, fmt.Errorf("trino returned no WWW-Authenticate header")
+		return bearerAuthChallenge{}, &externalAuthError{Kind: errNoWWWAuthenticateHeader, Message: errNoWWWAuthenticateHeader.Error()}
 	}
 
 	trustedOrigin, err := normalizedOrigin(requestURL)
 	if err != nil {
-		return bearerAuthChallenge{}, fmt.Errorf("invalid Trino request URL for external auth challenge validation: %w", err)
+		return bearerAuthChallenge{}, &externalAuthError{
+			Kind:    errExternalAuthInvalidURL,
+			Message: "invalid Trino request URL for external auth challenge validation",
+			Err:     err,
+		}
 	}
 
 	joined := strings.Join(values, ", ")
@@ -198,7 +265,7 @@ func parseBearerAuthChallenge(headers http.Header, requestURL *url.URL) (bearerA
 	redirectMatch := redirectServerPattern.FindStringSubmatch(joined)
 	tokenMatch := tokenServerPattern.FindStringSubmatch(joined)
 	if len(tokenMatch) < 2 {
-		return bearerAuthChallenge{}, fmt.Errorf("no Trino external auth challenge found in WWW-Authenticate header")
+		return bearerAuthChallenge{}, &externalAuthError{Kind: errNoExternalAuthChallenge, Message: errNoExternalAuthChallenge.Error()}
 	}
 
 	tokenURL, err := validateTrustedAuthURL(tokenMatch[1], trustedOrigin, "x_token_server")
@@ -222,7 +289,11 @@ func parseBearerAuthChallenge(headers http.Header, requestURL *url.URL) (bearerA
 func (m *externalAuthTokenManager) waitForToken(ctx context.Context, initialTokenURL string) (string, error) {
 	trustedOrigin, err := normalizedOriginFromRawURL(initialTokenURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid Trino external auth token URL %q: %w", initialTokenURL, err)
+		return "", &externalAuthError{
+			Kind:    errExternalAuthInvalidURL,
+			Message: fmt.Sprintf("invalid Trino external auth token URL %q", initialTokenURL),
+			Err:     err,
+		}
 	}
 
 	deadline := time.Now().Add(m.pollTimeout)
@@ -231,13 +302,21 @@ func (m *externalAuthTokenManager) waitForToken(ctx context.Context, initialToke
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, tokenURL, nil)
 		if err != nil {
-			return "", fmt.Errorf("failed to create token polling request: %w", err)
+			return "", &externalAuthError{
+				Kind:    errExternalAuthPollFailed,
+				Message: "failed to create token polling request",
+				Err:     err,
+			}
 		}
 		req.Header.Set("User-Agent", trinoAuthUserAgent)
 
 		resp, err := m.httpClient.Do(req)
 		if err != nil {
-			return "", fmt.Errorf("failed to poll Trino token endpoint: %w", err)
+			return "", &externalAuthError{
+				Kind:    errExternalAuthPollFailed,
+				Message: "failed to poll Trino token endpoint",
+				Err:     err,
+			}
 		}
 
 		var poll externalTokenPollResponse
@@ -246,20 +325,33 @@ func (m *externalAuthTokenManager) waitForToken(ctx context.Context, initialToke
 
 		if resp.StatusCode != http.StatusOK {
 			if decodeErr == nil && poll.Error != "" {
-				return "", fmt.Errorf("trino token polling failed: %s", poll.Error)
+				return "", &externalAuthError{
+					Kind:    errExternalAuthPollFailed,
+					Message: fmt.Sprintf("trino token polling failed: %s", poll.Error),
+				}
 			}
-			return "", fmt.Errorf("trino token polling failed with status %d", resp.StatusCode)
+			return "", &externalAuthError{
+				Kind:    errExternalAuthPollFailed,
+				Message: fmt.Sprintf("trino token polling failed with status %d", resp.StatusCode),
+			}
 		}
 		if decodeErr != nil {
-			return "", fmt.Errorf("failed to decode Trino token response: %w", decodeErr)
+			return "", &externalAuthError{
+				Kind:    errExternalAuthDecodeFailed,
+				Message: errExternalAuthDecodeFailed.Error(),
+				Err:     decodeErr,
+			}
 		}
 
 		if poll.Token != "" {
-			m.cleanupTokenURL(tokenURL)
+			m.cleanupTokenURL(ctx, tokenURL)
 			return poll.Token, nil
 		}
 		if poll.Error != "" {
-			return "", fmt.Errorf("trino token polling failed: %s", poll.Error)
+			return "", &externalAuthError{
+				Kind:    errExternalAuthPollFailed,
+				Message: fmt.Sprintf("trino token polling failed: %s", poll.Error),
+			}
 		}
 		if poll.NextURI != "" {
 			nextTokenURL, err := validateTrustedAuthURL(poll.NextURI, trustedOrigin, "nextUri")
@@ -276,11 +368,17 @@ func (m *externalAuthTokenManager) waitForToken(ctx context.Context, initialToke
 		}
 	}
 
-	return "", fmt.Errorf("timed out waiting for Trino access token after %v", m.pollTimeout)
+	return "", &externalAuthError{
+		Kind:    errExternalAuthPollTimedOut,
+		Message: fmt.Sprintf("timed out waiting for Trino access token after %v", m.pollTimeout),
+	}
 }
 
-func (m *externalAuthTokenManager) cleanupTokenURL(tokenURL string) {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodDelete, tokenURL, nil)
+func (m *externalAuthTokenManager) cleanupTokenURL(parentCtx context.Context, tokenURL string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), externalAuthCleanupTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, tokenURL, nil)
 	if err != nil {
 		return
 	}
@@ -321,11 +419,28 @@ func (m *externalAuthTokenManager) loadCache() *externalTokenCache {
 	if cache.AccessToken == "" {
 		return nil
 	}
+	if cache.ExpiresAt.IsZero() {
+		if expiresAt, ok := tokenExpiry(cache.AccessToken); ok {
+			cache.ExpiresAt = expiresAt
+		}
+	}
+	if !cache.ExpiresAt.IsZero() && !cache.ExpiresAt.After(time.Now()) {
+		return nil
+	}
 	return &cache
 }
 
 func (m *externalAuthTokenManager) saveCache(cache *externalTokenCache) {
 	if m.cachePath == "" || cache == nil || cache.AccessToken == "" {
+		return
+	}
+
+	if cache.ExpiresAt.IsZero() {
+		if expiresAt, ok := tokenExpiry(cache.AccessToken); ok {
+			cache.ExpiresAt = expiresAt
+		}
+	}
+	if tokenExpired(cache.ExpiresAt) {
 		return
 	}
 
@@ -377,16 +492,37 @@ func normalizedOriginFromRawURL(rawURL string) (string, error) {
 
 func normalizedOrigin(candidateURL *url.URL) (string, error) {
 	if candidateURL == nil {
-		return "", fmt.Errorf("missing URL")
+		return "", &externalAuthError{Kind: errExternalAuthInvalidURL, Message: "missing URL"}
 	}
 	if !candidateURL.IsAbs() {
-		return "", fmt.Errorf("URL %q is not absolute", candidateURL.String())
+		return "", &externalAuthError{
+			Kind:    errExternalAuthInvalidURL,
+			Message: fmt.Sprintf("URL %q is not absolute", candidateURL.String()),
+		}
 	}
 
 	scheme := strings.ToLower(candidateURL.Scheme)
-	host := strings.TrimSuffix(strings.ToLower(candidateURL.Hostname()), ".")
+	host := netutil.NormalizeHostname(candidateURL.Hostname())
 	if scheme == "" || host == "" {
-		return "", fmt.Errorf("URL %q must include scheme and host", candidateURL.String())
+		return "", &externalAuthError{
+			Kind:    errExternalAuthInvalidURL,
+			Message: fmt.Sprintf("URL %q must include scheme and host", candidateURL.String()),
+		}
+	}
+	switch scheme {
+	case "http", "https":
+	default:
+		return "", &externalAuthError{
+			Kind:    errExternalAuthInvalidURL,
+			Message: fmt.Sprintf("unsupported URL scheme %q", candidateURL.Scheme),
+		}
+	}
+
+	if !isAllowedExternalAuthSchemeHost(scheme, host) {
+		return "", &externalAuthError{
+			Kind:    errExternalAuthInsecureURL,
+			Message: fmt.Sprintf("external auth URL %q must use https unless host %q is loopback", candidateURL.String(), host),
+		}
 	}
 
 	port := candidateURL.Port()
@@ -396,8 +532,6 @@ func normalizedOrigin(candidateURL *url.URL) (string, error) {
 			port = "80"
 		case "https":
 			port = "443"
-		default:
-			return "", fmt.Errorf("unsupported URL scheme %q", candidateURL.Scheme)
 		}
 	}
 
@@ -407,19 +541,94 @@ func normalizedOrigin(candidateURL *url.URL) (string, error) {
 func validateTrustedAuthURL(rawURL string, trustedOrigin string, fieldName string) (string, error) {
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid %s URL %q: %w", fieldName, rawURL, err)
+		return "", &externalAuthError{
+			Kind:    errExternalAuthInvalidURL,
+			Message: fmt.Sprintf("invalid %s URL %q", fieldName, rawURL),
+			Err:     err,
+		}
 	}
 	if parsedURL.User != nil {
-		return "", fmt.Errorf("invalid %s URL %q: user info is not allowed", fieldName, rawURL)
+		return "", &externalAuthError{
+			Kind:    errExternalAuthInvalidURL,
+			Message: fmt.Sprintf("invalid %s URL %q: user info is not allowed", fieldName, rawURL),
+		}
 	}
 
 	candidateOrigin, err := normalizedOrigin(parsedURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid %s URL %q: %w", fieldName, rawURL, err)
+		kind := errExternalAuthInvalidURL
+		if errors.Is(err, errExternalAuthInsecureURL) {
+			kind = errExternalAuthInsecureURL
+		}
+		return "", &externalAuthError{
+			Kind:    kind,
+			Message: fmt.Sprintf("invalid %s URL %q", fieldName, rawURL),
+			Err:     err,
+		}
 	}
 	if candidateOrigin != trustedOrigin {
-		return "", fmt.Errorf("untrusted %s URL %q: expected origin %s", fieldName, rawURL, trustedOrigin)
+		return "", &externalAuthError{
+			Kind:    errExternalAuthUntrustedURL,
+			Message: fmt.Sprintf("untrusted %s URL %q: expected origin %s", fieldName, rawURL, trustedOrigin),
+		}
 	}
 
 	return parsedURL.String(), nil
+}
+
+func isAllowedExternalAuthSchemeHost(scheme, host string) bool {
+	if scheme == "https" {
+		return true
+	}
+	return scheme == "http" && netutil.IsLoopbackHost(host)
+}
+
+func tokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+
+	var claims struct {
+		Exp *jwtNumericDate `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return time.Time{}, false
+	}
+	if claims.Exp == nil || claims.Exp.Time.IsZero() {
+		return time.Time{}, false
+	}
+
+	return claims.Exp.Time, true
+}
+
+type jwtNumericDate struct {
+	time.Time
+}
+
+func (d *jwtNumericDate) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+
+	var unixNumber json.Number
+	if err := json.Unmarshal(data, &unixNumber); err == nil {
+		unixInt, err := unixNumber.Int64()
+		if err != nil {
+			return fmt.Errorf("invalid jwt exp claim: %w", err)
+		}
+		d.Time = time.Unix(unixInt, 0).UTC()
+		return nil
+	}
+
+	return fmt.Errorf("invalid jwt exp claim")
+}
+
+func tokenExpired(expiresAt time.Time) bool {
+	return !expiresAt.IsZero() && !expiresAt.After(time.Now())
 }

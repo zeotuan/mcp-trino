@@ -56,15 +56,65 @@ func TestTrinoAuthModeConfiguration(t *testing.T) {
 func TestTrinoAuthModeExternalRequiresHTTPS(t *testing.T) {
 	origAuthMode := os.Getenv("TRINO_AUTH_MODE")
 	origScheme := os.Getenv("TRINO_SCHEME")
+	origHost := os.Getenv("TRINO_HOST")
 	defer func() {
 		_ = os.Setenv("TRINO_AUTH_MODE", origAuthMode)
 		_ = os.Setenv("TRINO_SCHEME", origScheme)
+		_ = os.Setenv("TRINO_HOST", origHost)
 	}()
 
 	_ = os.Setenv("TRINO_AUTH_MODE", AuthModeExternalAuth.String())
 	_ = os.Setenv("TRINO_SCHEME", "http")
+	_ = os.Setenv("TRINO_HOST", "trino.example.com")
 
 	if _, err := NewTrinoConfig(); err == nil {
 		t.Fatal("expected error when external auth is configured over http")
+	}
+}
+
+func TestTrinoAuthModeExternalAllowsHTTPLoopback(t *testing.T) {
+	origAuthMode := os.Getenv("TRINO_AUTH_MODE")
+	origScheme := os.Getenv("TRINO_SCHEME")
+	origHost := os.Getenv("TRINO_HOST")
+	defer func() {
+		_ = os.Setenv("TRINO_AUTH_MODE", origAuthMode)
+		_ = os.Setenv("TRINO_SCHEME", origScheme)
+		_ = os.Setenv("TRINO_HOST", origHost)
+	}()
+
+	tests := []string{"localhost", "127.0.0.1", "::1"}
+	for _, host := range tests {
+		t.Run(host, func(t *testing.T) {
+			_ = os.Setenv("TRINO_AUTH_MODE", AuthModeExternalAuth.String())
+			_ = os.Setenv("TRINO_SCHEME", "http")
+			_ = os.Setenv("TRINO_HOST", host)
+
+			cfg, err := NewTrinoConfig()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.SSL {
+				t.Fatalf("expected SSL=false for loopback HTTP config")
+			}
+		})
+	}
+}
+
+func TestTrinoAuthModeExternalRejectsUnsupportedLoopbackScheme(t *testing.T) {
+	origAuthMode := os.Getenv("TRINO_AUTH_MODE")
+	origScheme := os.Getenv("TRINO_SCHEME")
+	origHost := os.Getenv("TRINO_HOST")
+	defer func() {
+		_ = os.Setenv("TRINO_AUTH_MODE", origAuthMode)
+		_ = os.Setenv("TRINO_SCHEME", origScheme)
+		_ = os.Setenv("TRINO_HOST", origHost)
+	}()
+
+	_ = os.Setenv("TRINO_AUTH_MODE", AuthModeExternalAuth.String())
+	_ = os.Setenv("TRINO_SCHEME", "ftp")
+	_ = os.Setenv("TRINO_HOST", "localhost")
+
+	if _, err := NewTrinoConfig(); err == nil {
+		t.Fatal("expected error for unsupported loopback scheme")
 	}
 }

@@ -3,6 +3,7 @@ package trino
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -84,14 +85,15 @@ func TestExternalAuthTokenManagerWaitForToken(t *testing.T) {
 func TestExternalAuthTokenManagerCache(t *testing.T) {
 	cachePath := filepath.Join(t.TempDir(), "external-cache.json")
 	manager := &externalAuthTokenManager{cachePath: cachePath}
-	manager.saveCache(&externalTokenCache{AccessToken: "cached-token"})
+	manager.saveCache(&externalTokenCache{AccessToken: testJWTWithExp(time.Now().Add(time.Hour))})
 
 	cache := manager.loadCache()
-	if cache == nil || cache.AccessToken != "cached-token" {
+	if cache == nil || cache.AccessToken == "" {
 		t.Fatalf("loadCache() = %#v", cache)
 	}
 
-	manager.token = "cached-token"
+	manager.token = cache.AccessToken
+	manager.tokenExpiresAt = cache.ExpiresAt
 	manager.InvalidateToken()
 	if manager.CurrentToken() != "" {
 		t.Error("expected invalidated token to be cleared")
@@ -134,31 +136,43 @@ func TestParseBearerAuthChallenge_RejectsCrossOriginURLs(t *testing.T) {
 		name        string
 		headerValue string
 		wantErr     string
+		wantKind    error
 	}{
 		{
 			name:        "redirect",
 			headerValue: `Bearer x_redirect_server="https://evil.example.com/oauth/init/123", x_token_server="https://trino.example.com/oauth/token/123"`,
 			wantErr:     `untrusted x_redirect_server URL`,
+			wantKind:    errExternalAuthUntrustedURL,
 		},
 		{
 			name:        "token",
 			headerValue: `Bearer x_redirect_server="https://trino.example.com/oauth/init/123", x_token_server="https://evil.example.com/oauth/token/123"`,
 			wantErr:     `untrusted x_token_server URL`,
+			wantKind:    errExternalAuthUntrustedURL,
 		},
 		{
 			name:        "token scheme downgrade",
 			headerValue: `Bearer x_redirect_server="https://trino.example.com/oauth/init/123", x_token_server="http://trino.example.com/oauth/token/123"`,
-			wantErr:     `untrusted x_token_server URL`,
+			wantErr:     `invalid x_token_server URL`,
+			wantKind:    errExternalAuthInsecureURL,
 		},
 		{
 			name:        "token port change",
 			headerValue: `Bearer x_redirect_server="https://trino.example.com/oauth/init/123", x_token_server="https://trino.example.com:8443/oauth/token/123"`,
 			wantErr:     `untrusted x_token_server URL`,
+			wantKind:    errExternalAuthUntrustedURL,
 		},
 		{
 			name:        "token userinfo",
 			headerValue: `Bearer x_redirect_server="https://trino.example.com/oauth/init/123", x_token_server="https://user@trino.example.com/oauth/token/123"`,
-			wantErr:     `user info is not allowed`,
+			wantErr:     `invalid x_token_server URL`,
+			wantKind:    errExternalAuthInvalidURL,
+		},
+		{
+			name:        "token insecure non-loopback",
+			headerValue: `Bearer x_redirect_server="https://trino.example.com/oauth/init/123", x_token_server="http://api.example.com/oauth/token/123"`,
+			wantErr:     `invalid x_token_server URL`,
+			wantKind:    errExternalAuthInsecureURL,
 		},
 	}
 
@@ -170,6 +184,9 @@ func TestParseBearerAuthChallenge_RejectsCrossOriginURLs(t *testing.T) {
 			_, err := parseBearerAuthChallenge(headers, req.URL)
 			if err == nil {
 				t.Fatal("expected error, got nil")
+			}
+			if !errors.Is(err, tt.wantKind) {
+				t.Fatalf("expected typed error %v, got %v", tt.wantKind, err)
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
@@ -361,7 +378,7 @@ func TestRoundTrip_BasicAuth(t *testing.T) {
 func TestResolveChallenge_StaleTokenRetry(t *testing.T) {
 	t.Parallel()
 
-	const tokenServerURL = "http://trino.example.com/token/xyz"
+	const tokenServerURL = "https://trino.example.com/token/xyz"
 
 	manager := &mockTokenManager{token: "stale-token"}
 	manager.acquireFunc = func(_ context.Context, ch bearerAuthChallenge, rejected string) (string, error) {
@@ -418,7 +435,7 @@ func TestResolveChallenge_StaleTokenRetry(t *testing.T) {
 		}),
 	}
 
-	req, err := http.NewRequest(http.MethodPost, "http://trino.example.com/v1/statement",
+	req, err := http.NewRequest(http.MethodPost, "https://trino.example.com/v1/statement",
 		strings.NewReader("SELECT 1"))
 	if err != nil {
 		t.Fatalf("http.NewRequest() error = %v", err)
@@ -448,7 +465,7 @@ func TestResolveChallenge_StaleTokenRetry(t *testing.T) {
 func TestExternalAuthRoundTrip_TerminalUnauthorized(t *testing.T) {
 	t.Parallel()
 
-	const tokenServerURL = "http://trino.example.com/token/xyz"
+	const tokenServerURL = "https://trino.example.com/token/xyz"
 
 	manager := &mockTokenManager{token: ""}
 	manager.acquireFunc = func(_ context.Context, _ bearerAuthChallenge, _ string) (string, error) {
@@ -490,7 +507,7 @@ func TestExternalAuthRoundTrip_TerminalUnauthorized(t *testing.T) {
 		}),
 	}
 
-	req, err := http.NewRequest(http.MethodPost, "http://trino.example.com/v1/statement",
+	req, err := http.NewRequest(http.MethodPost, "https://trino.example.com/v1/statement",
 		strings.NewReader("SELECT 1"))
 	if err != nil {
 		t.Fatalf("http.NewRequest() error = %v", err)
@@ -517,20 +534,22 @@ func TestExternalAuthRoundTrip_TerminalUnauthorized(t *testing.T) {
 func TestAcquireToken_ReturnsCachedIfAlreadyRefreshed(t *testing.T) {
 	t.Parallel()
 
+	cachedToken := testJWTWithExp(time.Now().Add(time.Hour))
 	manager := &externalAuthTokenManager{
 		pollInterval: 10 * time.Millisecond,
 		pollTimeout:  time.Second,
 	}
 	// Pre-populate the in-memory token (simulates another goroutine already refreshed).
-	manager.token = "new-token"
+	manager.token = cachedToken
+	manager.tokenExpiresAt = time.Now().Add(time.Hour)
 
-	challenge := bearerAuthChallenge{TokenURL: "http://example.com/token"}
+	challenge := bearerAuthChallenge{TokenURL: "https://example.com/token"}
 	token, err := manager.AcquireToken(t.Context(), challenge, "old-token")
 	if err != nil {
 		t.Fatalf("AcquireToken() error = %v", err)
 	}
-	if token != "new-token" {
-		t.Errorf("AcquireToken() = %q, want new-token", token)
+	if token != cachedToken {
+		t.Errorf("AcquireToken() = %q, want cached token %q", token, cachedToken)
 	}
 }
 
@@ -752,6 +771,38 @@ func TestAcquireToken_ContextCancellation(t *testing.T) {
 	wg.Wait()
 }
 
+func TestAcquireToken_ExpiredCachedTokenRefreshes(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"token":%q}`, testJWTWithExp(time.Now().Add(time.Hour)))))
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	manager := &externalAuthTokenManager{
+		httpClient:     server.Client(),
+		pollInterval:   10 * time.Millisecond,
+		pollTimeout:    time.Second,
+		token:          testJWTWithExp(time.Now().Add(-time.Minute)),
+		tokenExpiresAt: time.Now().Add(-time.Minute),
+		openBrowser:    func(string) error { return nil },
+	}
+
+	token, err := manager.AcquireToken(t.Context(), bearerAuthChallenge{TokenURL: server.URL}, "")
+	if err != nil {
+		t.Fatalf("AcquireToken() error = %v", err)
+	}
+	if token == "" || token == manager.token && tokenExpired(manager.tokenExpiresAt) {
+		t.Fatalf("expected refreshed token, got %q", token)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // waitForToken tests
 // ---------------------------------------------------------------------------
@@ -803,7 +854,7 @@ func TestWaitForToken_RejectsCrossOriginNextURI(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"nextUri":"http://evil.example.com/token/next"}`))
+		_, _ = w.Write([]byte(`{"nextUri":"https://evil.example.com/token/next"}`))
 	}))
 	t.Cleanup(server.Close)
 
@@ -819,6 +870,9 @@ func TestWaitForToken_RejectsCrossOriginNextURI(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "untrusted nextUri URL") {
 		t.Fatalf("error = %q, want it to mention untrusted nextUri", err.Error())
+	}
+	if !errors.Is(err, errExternalAuthUntrustedURL) {
+		t.Fatalf("expected typed untrusted URL error, got %v", err)
 	}
 }
 
@@ -843,6 +897,9 @@ func TestWaitForToken_RejectsRedirectResponse(t *testing.T) {
 	if !strings.Contains(err.Error(), "status 302") {
 		t.Fatalf("error = %q, want it to mention status 302", err.Error())
 	}
+	if !errors.Is(err, errExternalAuthPollFailed) {
+		t.Fatalf("expected typed poll failure error, got %v", err)
+	}
 }
 
 func TestWaitForToken_PollError(t *testing.T) {
@@ -866,6 +923,9 @@ func TestWaitForToken_PollError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "auth_denied") {
 		t.Errorf("error = %q, want it to contain auth_denied", err.Error())
+	}
+	if !errors.Is(err, errExternalAuthPollFailed) {
+		t.Fatalf("expected typed poll failure error, got %v", err)
 	}
 }
 
@@ -924,16 +984,20 @@ func TestWaitForToken_Timeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("error = %q, want it to contain \"timed out\"", err.Error())
 	}
+	if !errors.Is(err, errExternalAuthPollTimedOut) {
+		t.Fatalf("expected typed timeout error, got %v", err)
+	}
 }
 
 func TestNormalizedOrigin(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		rawURL  string
-		want    string
-		wantErr string
+		name     string
+		rawURL   string
+		want     string
+		wantErr  string
+		wantKind error
 	}{
 		{
 			name:   "https default port",
@@ -956,14 +1020,27 @@ func TestNormalizedOrigin(t *testing.T) {
 			want:   "http://[::1]:8080",
 		},
 		{
-			name:    "unsupported scheme",
-			rawURL:  "ftp://trino.example.com/token",
-			wantErr: `unsupported URL scheme "ftp"`,
+			name:   "loopback http allowed",
+			rawURL: "http://127.0.0.1:8080/v1/statement",
+			want:   "http://127.0.0.1:8080",
 		},
 		{
-			name:    "relative URL",
-			rawURL:  "/v1/statement",
-			wantErr: `is not absolute`,
+			name:     "unsupported scheme",
+			rawURL:   "ftp://trino.example.com/token",
+			wantErr:  `unsupported URL scheme "ftp"`,
+			wantKind: errExternalAuthInvalidURL,
+		},
+		{
+			name:     "non loopback http rejected",
+			rawURL:   "http://trino.example.com/token",
+			wantErr:  `must use https unless host "trino.example.com" is loopback`,
+			wantKind: errExternalAuthInsecureURL,
+		},
+		{
+			name:     "relative URL",
+			rawURL:   "/v1/statement",
+			wantErr:  `is not absolute`,
+			wantKind: errExternalAuthInvalidURL,
 		},
 	}
 
@@ -980,6 +1057,9 @@ func TestNormalizedOrigin(t *testing.T) {
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatal("expected error, got nil")
+				}
+				if !errors.Is(err, tt.wantKind) {
+					t.Fatalf("expected typed error %v, got %v", tt.wantKind, err)
 				}
 				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
@@ -1002,10 +1082,11 @@ func TestValidateTrustedAuthURL(t *testing.T) {
 	const trustedOrigin = "https://trino.example.com:443"
 
 	tests := []struct {
-		name    string
-		rawURL  string
-		want    string
-		wantErr string
+		name     string
+		rawURL   string
+		want     string
+		wantErr  string
+		wantKind error
 	}{
 		{
 			name:   "same origin default port",
@@ -1023,19 +1104,22 @@ func TestValidateTrustedAuthURL(t *testing.T) {
 			want:   "https://trino.example.com./oauth/token/123",
 		},
 		{
-			name:    "port mismatch",
-			rawURL:  "https://trino.example.com:8443/oauth/token/123",
-			wantErr: `untrusted x_token_server URL`,
+			name:     "port mismatch",
+			rawURL:   "https://trino.example.com:8443/oauth/token/123",
+			wantErr:  `untrusted x_token_server URL`,
+			wantKind: errExternalAuthUntrustedURL,
 		},
 		{
-			name:    "scheme mismatch",
-			rawURL:  "http://trino.example.com/oauth/token/123",
-			wantErr: `untrusted x_token_server URL`,
+			name:     "scheme mismatch",
+			rawURL:   "http://trino.example.com/oauth/token/123",
+			wantErr:  `invalid x_token_server URL`,
+			wantKind: errExternalAuthInsecureURL,
 		},
 		{
-			name:    "userinfo rejected",
-			rawURL:  "https://user@trino.example.com/oauth/token/123",
-			wantErr: `user info is not allowed`,
+			name:     "userinfo rejected",
+			rawURL:   "https://user@trino.example.com/oauth/token/123",
+			wantErr:  `invalid x_token_server URL`,
+			wantKind: errExternalAuthInvalidURL,
 		},
 	}
 
@@ -1047,6 +1131,9 @@ func TestValidateTrustedAuthURL(t *testing.T) {
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatal("expected error, got nil")
+				}
+				if !errors.Is(err, tt.wantKind) {
+					t.Fatalf("expected typed error %v, got %v", tt.wantKind, err)
 				}
 				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
@@ -1061,6 +1148,18 @@ func TestValidateTrustedAuthURL(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("loopback http allowed", func(t *testing.T) {
+		t.Parallel()
+
+		got, err := validateTrustedAuthURL("http://127.0.0.1:8080/oauth/token/123", "http://127.0.0.1:8080", "x_token_server")
+		if err != nil {
+			t.Fatalf("validateTrustedAuthURL() error = %v", err)
+		}
+		if got != "http://127.0.0.1:8080/oauth/token/123" {
+			t.Fatalf("validateTrustedAuthURL() = %q, want loopback URL", got)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,12 +1291,13 @@ func TestCachedTokenLocked_DiskLoad(t *testing.T) {
 
 	cachePath := filepath.Join(t.TempDir(), "token-cache.json")
 	manager := &externalAuthTokenManager{cachePath: cachePath}
-	manager.saveCache(&externalTokenCache{AccessToken: "disk-token"})
+	token := testJWTWithExp(time.Now().Add(time.Hour))
+	manager.saveCache(&externalTokenCache{AccessToken: token})
 
 	// In-memory token is empty; CurrentToken must load from disk.
 	got := manager.CurrentToken()
-	if got != "disk-token" {
-		t.Errorf("CurrentToken() via disk load = %q, want disk-token", got)
+	if got != token {
+		t.Errorf("CurrentToken() via disk load = %q, want %q", got, token)
 	}
 }
 
@@ -1228,6 +1328,9 @@ func TestExternalAuthRoundTrip_NoChallengeNoToken(t *testing.T) {
 	resp, err := transport.RoundTrip(req)
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, errNoWWWAuthenticateHeader) {
+		t.Fatalf("expected typed missing header error, got %v", err)
 	}
 	if resp != nil {
 		t.Errorf("expected nil resp alongside error, got %+v", resp)
@@ -1299,7 +1402,7 @@ func TestExternalAuthRoundTrip_AcquireTokenError(t *testing.T) {
 		tokenManager: manager,
 		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			hdr := http.Header{}
-			hdr.Add("WWW-Authenticate", `Bearer x_token_server="http://trino.example.com/token/1"`)
+			hdr.Add("WWW-Authenticate", `Bearer x_token_server="https://trino.example.com/token/1"`)
 			return &http.Response{
 				StatusCode: http.StatusUnauthorized,
 				Header:     hdr,
@@ -1308,7 +1411,7 @@ func TestExternalAuthRoundTrip_AcquireTokenError(t *testing.T) {
 		}),
 	}
 
-	req, _ := http.NewRequest(http.MethodGet, "http://trino.example.com/v1/statement", nil)
+	req, _ := http.NewRequest(http.MethodGet, "https://trino.example.com/v1/statement", nil)
 	resp, err := transport.RoundTrip(req)
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -1316,8 +1419,8 @@ func TestExternalAuthRoundTrip_AcquireTokenError(t *testing.T) {
 	if resp != nil {
 		t.Errorf("expected nil resp, got %+v", resp)
 	}
-	if !strings.Contains(err.Error(), "browser auth timeout") {
-		t.Errorf("error %q should mention underlying cause", err.Error())
+	if !errors.Is(err, acquireErr) {
+		t.Fatalf("expected wrapped acquire error, got %v", err)
 	}
 }
 
@@ -1330,7 +1433,7 @@ func TestExternalAuthRoundTrip_RejectsCrossOriginChallenge(t *testing.T) {
 		tokenManager: manager,
 		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			hdr := http.Header{}
-			hdr.Add("WWW-Authenticate", `Bearer x_token_server="http://evil.example.com/token/1"`)
+			hdr.Add("WWW-Authenticate", `Bearer x_token_server="https://evil.example.com/token/1"`)
 			return &http.Response{
 				StatusCode: http.StatusUnauthorized,
 				Header:     hdr,
@@ -1339,16 +1442,63 @@ func TestExternalAuthRoundTrip_RejectsCrossOriginChallenge(t *testing.T) {
 		}),
 	}
 
-	req, _ := http.NewRequest(http.MethodGet, "http://trino.example.com/v1/statement", nil)
+	req, _ := http.NewRequest(http.MethodGet, "https://trino.example.com/v1/statement", nil)
 	resp, err := transport.RoundTrip(req)
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, errExternalAuthUntrustedURL) {
+		t.Fatalf("expected typed untrusted URL error, got %v", err)
 	}
 	if resp != nil {
 		t.Errorf("expected nil resp, got %+v", resp)
 	}
 	if !strings.Contains(err.Error(), "untrusted x_token_server URL") {
 		t.Fatalf("error = %q, want it to mention untrusted x_token_server", err.Error())
+	}
+}
+
+func TestExternalAuthRoundTrip_StaleTokenDoesNotRetryInvalidChallenge(t *testing.T) {
+	t.Parallel()
+
+	manager := &mockTokenManager{token: "stale-token"}
+	manager.acquireFunc = func(_ context.Context, _ bearerAuthChallenge, _ string) (string, error) {
+		t.Fatal("AcquireToken should not be called for an invalid challenge")
+		return "", nil
+	}
+
+	var requestCount int
+	transport := &headerRoundTripper{
+		config:       &config.TrinoConfig{AuthMode: config.AuthModeExternalAuth},
+		tokenManager: manager,
+		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requestCount++
+			hdr := http.Header{}
+			hdr.Add("WWW-Authenticate", `Bearer x_token_server="https://evil.example.com/token/1"`)
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     hdr,
+				Body:       io.NopCloser(strings.NewReader("unauthorized")),
+			}, nil
+		}),
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, "https://trino.example.com/v1/statement", nil)
+	resp, err := transport.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, errExternalAuthUntrustedURL) {
+		t.Fatalf("expected typed untrusted URL error, got %v", err)
+	}
+	if resp != nil {
+		t.Errorf("expected nil resp, got %+v", resp)
+	}
+	if requestCount != 1 {
+		t.Fatalf("expected invalid challenge to fail without bare retry, got %d requests", requestCount)
+	}
+	if manager.invalidated != 0 {
+		t.Fatalf("expected token to remain untouched on invalid challenge, invalidated=%d", manager.invalidated)
 	}
 }
 
@@ -1369,8 +1519,8 @@ func TestAcquireToken_EmptyTokenURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty TokenURL, got nil")
 	}
-	if !strings.Contains(err.Error(), "missing Trino external auth token URL") {
-		t.Errorf("error = %q, want it to mention missing token URL", err.Error())
+	if !errors.Is(err, errMissingExternalAuthTokenURL) {
+		t.Fatalf("expected typed missing token URL error, got %v", err)
 	}
 }
 
@@ -1398,6 +1548,9 @@ func TestWaitForToken_HTTP400WithError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	if !errors.Is(err, errExternalAuthPollFailed) {
+		t.Fatalf("expected typed poll failure error, got %v", err)
+	}
 	if !strings.Contains(err.Error(), "invalid_token_request") {
 		t.Errorf("error = %q, want it to contain 'invalid_token_request'", err.Error())
 	}
@@ -1421,6 +1574,9 @@ func TestWaitForToken_HTTP400NoError(t *testing.T) {
 	_, err := manager.waitForToken(t.Context(), server.URL)
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, errExternalAuthPollFailed) {
+		t.Fatalf("expected typed poll failure error, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("error = %q, want it to mention status 500", err.Error())
@@ -1446,6 +1602,9 @@ func TestWaitForToken_DecodeError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected decode error, got nil")
 	}
+	if !errors.Is(err, errExternalAuthDecodeFailed) {
+		t.Fatalf("expected typed decode failure error, got %v", err)
+	}
 	if !strings.Contains(err.Error(), "failed to decode") {
 		t.Errorf("error = %q, want it to mention decode failure", err.Error())
 	}
@@ -1469,6 +1628,9 @@ func TestParseBearerAuthChallenge_NoTokenServer(t *testing.T) {
 	_, err = parseBearerAuthChallenge(headers, req.URL)
 	if err == nil {
 		t.Fatal("expected error for missing x_token_server, got nil")
+	}
+	if !errors.Is(err, errNoExternalAuthChallenge) {
+		t.Fatalf("expected typed missing challenge error, got %v", err)
 	}
 }
 
@@ -1542,4 +1704,74 @@ func TestLoadCache_EmptyAccessToken(t *testing.T) {
 	if manager.loadCache() != nil {
 		t.Error("expected nil from loadCache when access_token is empty")
 	}
+}
+
+func TestLoadCache_ExpiredJWT(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	token := testJWTWithExp(time.Now().Add(-time.Minute))
+	if err := os.WriteFile(cachePath, []byte(fmt.Sprintf(`{"access_token":%q}`, token)), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	manager := &externalAuthTokenManager{cachePath: cachePath}
+	if manager.loadCache() != nil {
+		t.Fatal("expected expired JWT cache to be ignored")
+	}
+}
+
+func TestLoadCache_UsesJWTExpWhenExpiresAtMissing(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	token := testJWTWithExp(time.Now().Add(time.Hour))
+	if err := os.WriteFile(cachePath, []byte(fmt.Sprintf(`{"access_token":%q}`, token)), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	manager := &externalAuthTokenManager{cachePath: cachePath}
+	cache := manager.loadCache()
+	if cache == nil {
+		t.Fatal("expected non-nil cache")
+	}
+	if cache.ExpiresAt.IsZero() {
+		t.Fatal("expected JWT exp to populate ExpiresAt")
+	}
+}
+
+func TestCleanupTokenURL_IgnoresCallerCancellation(t *testing.T) {
+	t.Parallel()
+
+	deleteCalled := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		select {
+		case deleteCalled <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+
+	manager := &externalAuthTokenManager{httpClient: server.Client()}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	manager.cleanupTokenURL(ctx, server.URL)
+
+	select {
+	case <-deleteCalled:
+	case <-time.After(time.Second):
+		t.Fatal("expected DELETE to still be issued after caller context cancellation")
+	}
+}
+
+func testJWTWithExp(exp time.Time) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp.Unix())))
+	return header + "." + payload + "."
 }
