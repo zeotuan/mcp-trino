@@ -270,6 +270,7 @@ For client integration and tool documentation, see [Integration Guide](docs/inte
 # Local-only mode that uses Trino's WWW-Authenticate browser challenge
 # mcp-trino opens the browser URL from x_redirect_server, polls x_token_server,
 # then caches the returned bearer token for reuse.
+# Challenge URLs must stay on the Trino coordinator origin.
 export TRINO_HOST=trino.example.com
 export TRINO_PORT=443
 export TRINO_SCHEME=https
