@@ -57,15 +57,18 @@ func TestTrinoAuthModeExternalRequiresHTTPS(t *testing.T) {
 	origAuthMode := os.Getenv("TRINO_AUTH_MODE")
 	origScheme := os.Getenv("TRINO_SCHEME")
 	origHost := os.Getenv("TRINO_HOST")
+	origTransport := os.Getenv("MCP_TRANSPORT")
 	defer func() {
 		_ = os.Setenv("TRINO_AUTH_MODE", origAuthMode)
 		_ = os.Setenv("TRINO_SCHEME", origScheme)
 		_ = os.Setenv("TRINO_HOST", origHost)
+		_ = os.Setenv("MCP_TRANSPORT", origTransport)
 	}()
 
 	_ = os.Setenv("TRINO_AUTH_MODE", AuthModeExternalAuth.String())
 	_ = os.Setenv("TRINO_SCHEME", "http")
 	_ = os.Setenv("TRINO_HOST", "trino.example.com")
+	_ = os.Unsetenv("MCP_TRANSPORT")
 
 	if _, err := NewTrinoConfig(); err == nil {
 		t.Fatal("expected error when external auth is configured over http")
@@ -76,10 +79,12 @@ func TestTrinoAuthModeExternalAllowsHTTPLoopback(t *testing.T) {
 	origAuthMode := os.Getenv("TRINO_AUTH_MODE")
 	origScheme := os.Getenv("TRINO_SCHEME")
 	origHost := os.Getenv("TRINO_HOST")
+	origTransport := os.Getenv("MCP_TRANSPORT")
 	defer func() {
 		_ = os.Setenv("TRINO_AUTH_MODE", origAuthMode)
 		_ = os.Setenv("TRINO_SCHEME", origScheme)
 		_ = os.Setenv("TRINO_HOST", origHost)
+		_ = os.Setenv("MCP_TRANSPORT", origTransport)
 	}()
 
 	tests := []string{"localhost", "127.0.0.1", "::1"}
@@ -88,6 +93,7 @@ func TestTrinoAuthModeExternalAllowsHTTPLoopback(t *testing.T) {
 			_ = os.Setenv("TRINO_AUTH_MODE", AuthModeExternalAuth.String())
 			_ = os.Setenv("TRINO_SCHEME", "http")
 			_ = os.Setenv("TRINO_HOST", host)
+			_ = os.Unsetenv("MCP_TRANSPORT")
 
 			cfg, err := NewTrinoConfig()
 			if err != nil {
@@ -104,17 +110,42 @@ func TestTrinoAuthModeExternalRejectsUnsupportedLoopbackScheme(t *testing.T) {
 	origAuthMode := os.Getenv("TRINO_AUTH_MODE")
 	origScheme := os.Getenv("TRINO_SCHEME")
 	origHost := os.Getenv("TRINO_HOST")
+	origTransport := os.Getenv("MCP_TRANSPORT")
 	defer func() {
 		_ = os.Setenv("TRINO_AUTH_MODE", origAuthMode)
 		_ = os.Setenv("TRINO_SCHEME", origScheme)
 		_ = os.Setenv("TRINO_HOST", origHost)
+		_ = os.Setenv("MCP_TRANSPORT", origTransport)
 	}()
 
 	_ = os.Setenv("TRINO_AUTH_MODE", AuthModeExternalAuth.String())
 	_ = os.Setenv("TRINO_SCHEME", "ftp")
 	_ = os.Setenv("TRINO_HOST", "localhost")
+	_ = os.Unsetenv("MCP_TRANSPORT")
 
 	if _, err := NewTrinoConfig(); err == nil {
 		t.Fatal("expected error for unsupported loopback scheme")
+	}
+}
+
+func TestTrinoAuthModeExternalRejectsHTTPTransport(t *testing.T) {
+	origAuthMode := os.Getenv("TRINO_AUTH_MODE")
+	origScheme := os.Getenv("TRINO_SCHEME")
+	origHost := os.Getenv("TRINO_HOST")
+	origTransport := os.Getenv("MCP_TRANSPORT")
+	defer func() {
+		_ = os.Setenv("TRINO_AUTH_MODE", origAuthMode)
+		_ = os.Setenv("TRINO_SCHEME", origScheme)
+		_ = os.Setenv("TRINO_HOST", origHost)
+		_ = os.Setenv("MCP_TRANSPORT", origTransport)
+	}()
+
+	_ = os.Setenv("TRINO_AUTH_MODE", AuthModeExternalAuth.String())
+	_ = os.Setenv("TRINO_SCHEME", "https")
+	_ = os.Setenv("TRINO_HOST", "trino.example.com")
+	_ = os.Setenv("MCP_TRANSPORT", "http")
+
+	if _, err := NewTrinoConfig(); err == nil {
+		t.Fatal("expected error when external auth is configured with MCP_TRANSPORT=http")
 	}
 }

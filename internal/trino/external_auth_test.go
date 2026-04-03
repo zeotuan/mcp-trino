@@ -103,6 +103,18 @@ func TestExternalAuthTokenManagerCache(t *testing.T) {
 	}
 }
 
+func TestExternalAuthFileTokenStore_SaveSkipsExpiredToken(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "external-cache.json")
+	store := newExternalAuthFileTokenStore(cachePath)
+	store.Save(&externalTokenCache{AccessToken: testJWTWithExp(time.Now().Add(-time.Minute))})
+
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("expected no cache file for expired token, got err=%v", err)
+	}
+}
+
 func TestParseBearerAuthChallenge_TokenOnly(t *testing.T) {
 	headers := http.Header{}
 	headers.Add("WWW-Authenticate", `Bearer x_token_server="https://trino.example.com/oauth/token/456"`)
@@ -283,6 +295,45 @@ func TestBuildDSNExternalModeOmitsPassword(t *testing.T) {
 	}
 	if !strings.Contains(dsn, "alice@trino.example.com:443") {
 		t.Fatalf("expected DSN to retain user attribution, got %q", dsn)
+	}
+}
+
+func TestNewHeaderRoundTripper_ExternalAuthWiresTokenManager(t *testing.T) {
+	t.Parallel()
+
+	transport := newHeaderRoundTripper(nil, &config.TrinoConfig{
+		AuthMode: config.AuthModeExternalAuth,
+		Scheme:   "https",
+		Host:     "trino.example.com",
+		Port:     443,
+		User:     "alice",
+	})
+
+	if transport.base == nil {
+		t.Fatal("expected base transport to be set")
+	}
+
+	manager, ok := transport.tokenManager.(*externalAuthTokenManager)
+	if !ok {
+		t.Fatalf("expected externalAuthTokenManager, got %T", transport.tokenManager)
+	}
+	if manager.store == nil {
+		t.Fatal("expected file token store to be wired")
+	}
+	if manager.poller == nil {
+		t.Fatal("expected HTTP poller to be wired")
+	}
+	if manager.openBrowser == nil {
+		t.Fatal("expected browser launcher to be wired")
+	}
+	if manager.pollInterval != externalAuthDefaultPollInterval {
+		t.Fatalf("pollInterval = %v, want %v", manager.pollInterval, externalAuthDefaultPollInterval)
+	}
+	if manager.pollTimeout != externalAuthDefaultPollTimeout {
+		t.Fatalf("pollTimeout = %v, want %v", manager.pollTimeout, externalAuthDefaultPollTimeout)
+	}
+	if manager.cachePath == "" {
+		t.Fatal("expected cache path to be configured")
 	}
 }
 
@@ -639,7 +690,7 @@ func TestAcquireToken_InFlightCoalescing(t *testing.T) {
 	}
 }
 
-func TestAcquireToken_GenerationFence(t *testing.T) {
+func TestAcquireToken_RacedInvalidationRetainsFreshToken(t *testing.T) {
 	t.Parallel()
 
 	unblock := make(chan struct{})
@@ -690,7 +741,9 @@ func TestAcquireToken_GenerationFence(t *testing.T) {
 		}
 	}
 
-	// Invalidate while acquisition is in progress — bumps the generation counter.
+	// Invalidate while acquisition is in progress — bumps the generation counter
+	// and clears prior state, but should not discard the fresh token that is
+	// about to complete.
 	manager.InvalidateToken()
 
 	// Let the poll server return the token.
@@ -704,12 +757,16 @@ func TestAcquireToken_GenerationFence(t *testing.T) {
 		t.Errorf("returned token = %q, want raced-token", acquiredToken)
 	}
 
-	// Generation fence: the raced token must NOT have been written to m.token.
+	// The manager should now retain the newly acquired token so the next request
+	// does not immediately trigger another browser flow.
 	manager.mu.Lock()
 	stored := manager.token
 	manager.mu.Unlock()
-	if stored != "" {
-		t.Errorf("m.token = %q after generation fence, want empty", stored)
+	if stored != "raced-token" {
+		t.Errorf("m.token = %q after raced invalidation, want raced-token", stored)
+	}
+	if got := manager.CurrentToken(); got != "raced-token" {
+		t.Errorf("CurrentToken() = %q, want raced-token", got)
 	}
 }
 
@@ -885,7 +942,7 @@ func TestWaitForToken_RejectsRedirectResponse(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	manager := &externalAuthTokenManager{
-		httpClient:   newExternalAuthHTTPClient(server.Client()),
+		httpClient:   server.Client(),
 		pollInterval: 10 * time.Millisecond,
 		pollTimeout:  time.Second,
 	}
@@ -1497,8 +1554,8 @@ func TestExternalAuthRoundTrip_StaleTokenDoesNotRetryInvalidChallenge(t *testing
 	if requestCount != 1 {
 		t.Fatalf("expected invalid challenge to fail without bare retry, got %d requests", requestCount)
 	}
-	if manager.invalidated != 0 {
-		t.Fatalf("expected token to remain untouched on invalid challenge, invalidated=%d", manager.invalidated)
+	if manager.invalidated != 1 {
+		t.Fatalf("expected rejected token to be invalidated on invalid challenge, invalidated=%d", manager.invalidated)
 	}
 }
 
@@ -1674,6 +1731,84 @@ func TestAcquireFreshToken_BrowserError(t *testing.T) {
 	}
 }
 
+func TestAcquireFreshToken_BrowserErrorShowsManualURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"polled-token"}`))
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	manager := &externalAuthTokenManager{
+		httpClient:   server.Client(),
+		pollInterval: 10 * time.Millisecond,
+		pollTimeout:  time.Second,
+		openBrowser:  func(_ string) error { return fmt.Errorf("no browser available") },
+	}
+
+	challenge := bearerAuthChallenge{
+		RedirectURL: server.URL + "/oauth/init",
+		TokenURL:    server.URL,
+	}
+
+	stderr := captureStderr(t, func() {
+		token, err := manager.acquireFreshToken(t.Context(), challenge)
+		if err != nil {
+			t.Fatalf("acquireFreshToken() error = %v", err)
+		}
+		if token != "polled-token" {
+			t.Fatalf("token = %q, want polled-token", token)
+		}
+	})
+
+	if !strings.Contains(stderr, "Could not open browser automatically. Open this URL manually:") {
+		t.Fatalf("stderr = %q, want manual browser fallback message", stderr)
+	}
+	if !strings.Contains(stderr, challenge.RedirectURL) {
+		t.Fatalf("stderr = %q, want redirect URL %q", stderr, challenge.RedirectURL)
+	}
+}
+
+func TestAcquireFreshToken_TokenOnlyShowsWaitingMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"polled-token"}`))
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	manager := &externalAuthTokenManager{
+		httpClient:   server.Client(),
+		pollInterval: 10 * time.Millisecond,
+		pollTimeout:  time.Second,
+	}
+
+	stderr := captureStderr(t, func() {
+		token, err := manager.acquireFreshToken(t.Context(), bearerAuthChallenge{TokenURL: server.URL})
+		if err != nil {
+			t.Fatalf("acquireFreshToken() error = %v", err)
+		}
+		if token != "polled-token" {
+			t.Fatalf("token = %q, want polled-token", token)
+		}
+	})
+
+	if !strings.Contains(stderr, "Waiting for Trino authentication token...") {
+		t.Fatalf("stderr = %q, want waiting message", stderr)
+	}
+	if !strings.Contains(stderr, "Trino did not provide a browser redirect URL") {
+		t.Fatalf("stderr = %q, want token-only explanation", stderr)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // loadCache — corrupt JSON and empty access_token
 // ---------------------------------------------------------------------------
@@ -1774,4 +1909,35 @@ func testJWTWithExp(exp time.Time) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp.Unix())))
 	return header + "." + payload + "."
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	defer func() {
+		_ = reader.Close()
+	}()
+
+	originalStderr := os.Stderr
+	os.Stderr = writer
+	defer func() {
+		os.Stderr = originalStderr
+	}()
+
+	fn()
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer.Close() error = %v", err)
+	}
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("io.ReadAll() error = %v", err)
+	}
+
+	return string(data)
 }

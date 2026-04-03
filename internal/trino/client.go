@@ -1,12 +1,9 @@
 package trino
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -82,148 +79,7 @@ func init() {
 // Context key for impersonated user
 type contextKey string
 
-const (
-	impersonatedUserKey contextKey = "impersonated_user"
-
-	// maxAuthRetries caps how many token-refresh cycles the external auth flow attempts.
-	maxAuthRetries = 1
-	// maxChallengeRetries caps how many times resolveChallenge retries to obtain a fresh challenge.
-	maxChallengeRetries = 1
-)
-
-// headerRoundTripper adds Trino headers and handles external auth challenge/retry.
-type headerRoundTripper struct {
-	base         http.RoundTripper
-	config       *config.TrinoConfig
-	tokenManager bearerTokenManager
-}
-
-// RoundTrip dispatches to the appropriate auth flow.
-func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if t.config.AuthMode == config.AuthModeExternalAuth {
-		return t.externalAuthRoundTrip(req)
-	}
-	return t.dispatchDecorated(req, nil, "")
-}
-
-// externalAuthRoundTrip attempts with a cached token; on 401 drives the Trino
-// browser challenge flow and retries up to maxAuthRetries times.
-func (t *headerRoundTripper) externalAuthRoundTrip(req *http.Request) (*http.Response, error) {
-	body, err := readRequestBody(req)
-	if err != nil {
-		return nil, err
-	}
-
-	token := t.tokenManager.CurrentToken()
-	for attempt := 0; ; attempt++ {
-		resp, err := t.dispatchDecorated(req, body, token)
-		if err != nil || resp.StatusCode != http.StatusUnauthorized || attempt >= maxAuthRetries {
-			// Invalidate a token the server just rejected so the next request
-			// doesn't reuse it.
-			if err == nil && resp.StatusCode == http.StatusUnauthorized && token != "" {
-				t.tokenManager.InvalidateToken()
-			}
-			return resp, err
-		}
-
-		challenge, resp, err := t.resolveChallenge(req, body, token, resp)
-		if err != nil {
-			return nil, err
-		}
-		if challenge.TokenURL == "" {
-			return resp, nil
-		}
-
-		_ = resp.Body.Close()
-		token, err = t.tokenManager.AcquireToken(req.Context(), challenge, token)
-		if err != nil {
-			return nil, fmt.Errorf("failed to complete Trino external authentication: %w", err)
-		}
-	}
-}
-
-// resolveChallenge parses the Trino bearer challenge from a 401 response.
-// If the 401 had no challenge (stale token rejection), invalidates the token
-// and retries bare once so Trino issues a fresh challenge.
-func (t *headerRoundTripper) resolveChallenge(
-	req *http.Request,
-	body []byte,
-	sentToken string,
-	resp *http.Response,
-) (bearerAuthChallenge, *http.Response, error) {
-	for attempt := 0; attempt <= maxChallengeRetries; attempt++ {
-		challenge, err := parseBearerAuthChallenge(resp.Header, req.URL)
-		if err == nil {
-			return challenge, resp, nil
-		}
-		if sentToken == "" ||
-			attempt == maxChallengeRetries ||
-			(!errors.Is(err, errNoWWWAuthenticateHeader) && !errors.Is(err, errNoExternalAuthChallenge)) {
-			// Close the body: callers must not receive a non-nil resp alongside
-			// a non-nil err (RoundTripper contract).
-			_ = resp.Body.Close()
-			return bearerAuthChallenge{}, nil, err
-		}
-
-		// Stale token rejected without a challenge — clear it and retry bare.
-		_ = resp.Body.Close()
-		t.tokenManager.InvalidateToken()
-		sentToken = ""
-
-		resp, err = t.dispatchDecorated(req, body, "")
-		if err != nil || resp.StatusCode != http.StatusUnauthorized {
-			return bearerAuthChallenge{}, resp, err
-		}
-	}
-
-	return bearerAuthChallenge{}, nil, fmt.Errorf("internal: resolveChallenge loop exited unexpectedly")
-}
-
-// dispatchDecorated decorates the request and sends it through the base transport.
-// Pass nil body to preserve the original; pass buffered bytes on retry paths.
-func (t *headerRoundTripper) dispatchDecorated(req *http.Request, body []byte, bearerToken string) (*http.Response, error) {
-	return t.base.RoundTrip(t.decorateRequest(req, body, bearerToken))
-}
-
-// decorateRequest clones req, optionally overrides the body, and injects Trino headers.
-func (t *headerRoundTripper) decorateRequest(req *http.Request, body []byte, token string) *http.Request {
-	cloned := req.Clone(req.Context())
-
-	if body != nil {
-		cloned.Body = io.NopCloser(bytes.NewReader(body))
-		cloned.ContentLength = int64(len(body))
-	}
-
-	if token != "" {
-		cloned.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	if t.config.TrinoSource != "" {
-		cloned.Header.Set("X-Trino-Source", t.config.TrinoSource)
-	}
-
-	if t.config.EnableImpersonation {
-		if user, ok := req.Context().Value(impersonatedUserKey).(string); ok && user != "" {
-			cloned.Header.Set("X-Trino-User", user)
-		}
-	}
-
-	return cloned
-}
-
-func readRequestBody(req *http.Request) ([]byte, error) {
-	if req.Body == nil {
-		return nil, nil
-	}
-
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read request body for retry: %w", err)
-	}
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	req.ContentLength = int64(len(body))
-	return body, nil
-}
+const impersonatedUserKey contextKey = "impersonated_user"
 
 // Client is a wrapper around Trino client
 type Client struct {
@@ -232,17 +88,22 @@ type Client struct {
 	timeout time.Duration
 }
 
-// NewClient creates a new Trino client
+// NewClient creates a new Trino client and verifies the initial connection.
 func NewClient(cfg *config.TrinoConfig) (*Client, error) {
+	return newClient(cfg, true)
+}
+
+// NewClientWithoutVerify creates a new Trino client without an eager ping.
+// This is useful for startup paths that must not block behind interactive auth.
+func NewClientWithoutVerify(cfg *config.TrinoConfig) (*Client, error) {
+	return newClient(cfg, false)
+}
+
+func newClient(cfg *config.TrinoConfig, verifyConnection bool) (*Client, error) {
 	dsn := buildDSN(cfg)
-	tokenManager := createBearerTokenManager(cfg)
 
 	httpClient := &http.Client{
-		Transport: &headerRoundTripper{
-			base:         http.DefaultTransport,
-			config:       cfg,
-			tokenManager: tokenManager,
-		},
+		Transport: newHeaderRoundTripper(http.DefaultTransport, cfg),
 	}
 	if err := trino.RegisterCustomClient("mcp-trino", httpClient); err != nil {
 		// Ignore "already registered" errors - this can happen in tests or when client is recreated
@@ -263,15 +124,17 @@ func NewClient(cfg *config.TrinoConfig) (*Client, error) {
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	// Test the connection
-	if err := db.Ping(); err != nil {
-		closeErr := db.Close()
-		if closeErr != nil {
-			log.Printf("Error closing DB connection: %v", closeErr)
+	if verifyConnection {
+		// Test the connection
+		if err := db.Ping(); err != nil {
+			closeErr := db.Close()
+			if closeErr != nil {
+				log.Printf("Error closing DB connection: %v", closeErr)
+			}
+			// Sanitize error to prevent password exposure
+			sanitizedErr := sanitizeConnectionError(err, cfg.Password)
+			return nil, fmt.Errorf("failed to ping Trino: %w", sanitizedErr)
 		}
-		// Sanitize error to prevent password exposure
-		sanitizedErr := sanitizeConnectionError(err, cfg.Password)
-		return nil, fmt.Errorf("failed to ping Trino: %w", sanitizedErr)
 	}
 
 	return &Client{
