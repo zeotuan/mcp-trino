@@ -210,19 +210,19 @@ func isTTY() bool {
 // hasCLIOnlyFlags checks if args contain CLI-only flags (no subcommand)
 func hasCLIOnlyFlags(args []string) bool {
 	cliFlags := map[string]bool{
-		"--help":        true,
-		"-h":            true,
-		"--version":     true,
-		"-v":            true,
-		"--config":      true,
-		"--format":      true,
-		"--host":        true,
-		"--port":        true,
-		"--user":        true,
-		"--password":    true,
-		"--catalog":     true,
-		"--schema":      true,
-		"--profile":     true, // profile selection is CLI-specific
+		"--help":     true,
+		"-h":         true,
+		"--version":  true,
+		"-v":         true,
+		"--config":   true,
+		"--format":   true,
+		"--host":     true,
+		"--port":     true,
+		"--user":     true,
+		"--password": true,
+		"--catalog":  true,
+		"--schema":   true,
+		"--profile":  true, // profile selection is CLI-specific
 		"--interactive": true,
 	}
 
