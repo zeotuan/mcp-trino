@@ -90,16 +90,6 @@ type Client struct {
 
 // NewClient creates a new Trino client and verifies the initial connection.
 func NewClient(cfg *config.TrinoConfig) (*Client, error) {
-	return newClient(cfg, true)
-}
-
-// NewClientWithoutVerify creates a new Trino client without an eager ping.
-// This is useful for startup paths that must not block behind interactive auth.
-func NewClientWithoutVerify(cfg *config.TrinoConfig) (*Client, error) {
-	return newClient(cfg, false)
-}
-
-func newClient(cfg *config.TrinoConfig, verifyConnection bool) (*Client, error) {
 	dsn := buildDSN(cfg)
 
 	httpClient := &http.Client{
@@ -124,17 +114,15 @@ func newClient(cfg *config.TrinoConfig, verifyConnection bool) (*Client, error) 
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	if verifyConnection {
-		// Test the connection
-		if err := db.Ping(); err != nil {
-			closeErr := db.Close()
-			if closeErr != nil {
-				log.Printf("Error closing DB connection: %v", closeErr)
-			}
-			// Sanitize error to prevent password exposure
-			sanitizedErr := sanitizeConnectionError(err, cfg.Password)
-			return nil, fmt.Errorf("failed to ping Trino: %w", sanitizedErr)
+	// Test the connection
+	if err := db.Ping(); err != nil {
+		closeErr := db.Close()
+		if closeErr != nil {
+			log.Printf("Error closing DB connection: %v", closeErr)
 		}
+		// Sanitize error to prevent password exposure
+		sanitizedErr := sanitizeConnectionError(err, cfg.Password)
+		return nil, fmt.Errorf("failed to ping Trino: %w", sanitizedErr)
 	}
 
 	return &Client{

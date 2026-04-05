@@ -3,8 +3,6 @@ package main
 import (
 	"os"
 	"testing"
-
-	"github.com/tuannvm/mcp-trino/internal/config"
 )
 
 func TestShouldRunCLIMode_KnownCommands(t *testing.T) {
@@ -301,37 +299,5 @@ func TestIsTTY(t *testing.T) {
 	result := isTTY()
 	if result != true && result != false {
 		t.Errorf("isTTY() returned non-boolean value")
-	}
-}
-
-func TestShouldVerifyTrinoConnectionOnStartup(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  *config.TrinoConfig
-		want bool
-	}{
-		{
-			name: "nil config defaults to verify",
-			cfg:  nil,
-			want: true,
-		},
-		{
-			name: "basic auth verifies on startup",
-			cfg:  &config.TrinoConfig{AuthMode: config.AuthModeBasic},
-			want: true,
-		},
-		{
-			name: "external auth defers verification",
-			cfg:  &config.TrinoConfig{AuthMode: config.AuthModeExternalAuth},
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldVerifyTrinoConnectionOnStartup(tt.cfg); got != tt.want {
-				t.Fatalf("shouldVerifyTrinoConnectionOnStartup() = %v, want %v", got, tt.want)
-			}
-		})
 	}
 }

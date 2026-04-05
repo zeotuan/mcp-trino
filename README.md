@@ -273,8 +273,6 @@ For client integration and tool documentation, see [Integration Guide](docs/inte
 # Challenge URLs must stay on the Trino coordinator origin.
 # Non-loopback coordinators must use HTTPS; cleartext HTTP is allowed only for localhost/127.0.0.1/::1.
 # External browser auth is local interactive mode only and requires MCP_TRANSPORT=stdio.
-# In MCP mode, initial Trino verification is deferred until the first tool call
-# so the server can start before interactive browser auth begins.
 export TRINO_HOST=trino.example.com
 export TRINO_PORT=443
 export TRINO_SCHEME=https

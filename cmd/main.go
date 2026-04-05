@@ -115,17 +115,9 @@ func runMCPServer() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	verifyTrinoOnStartup := shouldVerifyTrinoConnectionOnStartup(trinoConfig)
-
 	// Initialize Trino client
 	log.Println("Connecting to Trino server...")
-	var trinoClient *trino.Client
-	if verifyTrinoOnStartup {
-		trinoClient, err = trino.NewClient(trinoConfig)
-	} else {
-		log.Println("Deferring Trino verification until the first external-auth tool call.")
-		trinoClient, err = trino.NewClientWithoutVerify(trinoConfig)
-	}
+	trinoClient, err := trino.NewClient(trinoConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize Trino client: %v", err)
 	}
@@ -135,17 +127,13 @@ func runMCPServer() {
 		}
 	}()
 
-	if verifyTrinoOnStartup {
-		// Test connection by listing catalogs
-		log.Println("Testing Trino connection...")
-		catalogs, err := trinoClient.ListCatalogsWithContext(context.Background())
-		if err != nil {
-			log.Fatalf("Failed to connect to Trino: %v", err)
-		}
-		log.Printf("Connected to Trino server. Available catalogs: %s", strings.Join(catalogs, ", "))
-	} else {
-		log.Println("Skipping eager Trino verification for external auth during MCP startup.")
+	// Test connection by listing catalogs
+	log.Println("Testing Trino connection...")
+	catalogs, err := trinoClient.ListCatalogsWithContext(context.Background())
+	if err != nil {
+		log.Fatalf("Failed to connect to Trino: %v", err)
 	}
+	log.Printf("Connected to Trino server. Available catalogs: %s", strings.Join(catalogs, ", "))
 
 	// Create MCP server
 	log.Println("Initializing MCP server...")
@@ -170,10 +158,6 @@ func runMCPServer() {
 	}
 
 	log.Println("Server shutdown complete")
-}
-
-func shouldVerifyTrinoConnectionOnStartup(cfg *config.TrinoConfig) bool {
-	return cfg == nil || cfg.AuthMode != config.AuthModeExternalAuth
 }
 
 // shouldRunCLIMode determines if we should run in CLI mode based on arguments

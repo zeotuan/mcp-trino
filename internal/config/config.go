@@ -3,12 +3,12 @@ package config
 import (
 	"context"
 	"fmt"
+	"github.com/tuannvm/mcp-trino/internal/secret"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-	"github.com/tuannvm/mcp-trino/internal/secret"
 )
 
 type AuthMode string
@@ -204,14 +204,14 @@ func NewTrinoConfigWithVersion(version string) (*TrinoConfig, error) {
 		// If explicitly set to empty, use default
 		trinoSource = fmt.Sprintf("mcp-trino/%s", version)
 	}
-	authMode, err := ParseAuthMode(getEnv("TRINO_AUTH_MODE", ""))
+	authMode, err := ParseAuthMode(resolveEnv("TRINO_AUTH_MODE", ""))
 	if err != nil {
 		return nil, err
 	}
 	switch authMode {
 	case AuthModeBasic:
 	case AuthModeExternalAuth:
-		if err := validateExternalAuthMode(scheme, getEnv("TRINO_HOST", "localhost"), getEnv("MCP_TRANSPORT", "stdio")); err != nil {
+		if err := validateExternalAuthMode(scheme, resolveEnv("TRINO_HOST", "localhost"), getEnv("MCP_TRANSPORT", "stdio")); err != nil {
 			return nil, err
 		}
 	}

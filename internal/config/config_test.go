@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -338,7 +339,7 @@ func TestNewTrinoConfigMalformedAllowlist(t *testing.T) {
 
 func TestNewTrinoConfigLoadsSecretsFromCommandProvider(t *testing.T) {
 	t.Setenv("TRINO_SECRET_SOURCE", "command://local")
-	t.Setenv("TRINO_SECRET_COMMAND", `printf '%s' '{"TRINO_USER":"secret-user","TRINO_PASSWORD":"secret-pass"}'`)
+	t.Setenv("TRINO_SECRET_COMMAND", testSecretJSONCommand(`{"TRINO_USER":"secret-user","TRINO_PASSWORD":"secret-pass"}`))
 	t.Setenv("TRINO_USER", "env-user")
 	t.Setenv("TRINO_PASSWORD", "env-pass")
 	t.Setenv("OAUTH_ENABLED", "false")
@@ -358,7 +359,7 @@ func TestNewTrinoConfigLoadsSecretsFromCommandProvider(t *testing.T) {
 
 func TestNewTrinoConfigFallsBackWhenSecretSourceFails(t *testing.T) {
 	t.Setenv("TRINO_SECRET_SOURCE", "command://local")
-	t.Setenv("TRINO_SECRET_COMMAND", "false")
+	t.Setenv("TRINO_SECRET_COMMAND", testSecretFailureCommand())
 	t.Setenv("TRINO_SECRET_REQUIRED", "false")
 	t.Setenv("TRINO_USER", "env-user")
 	t.Setenv("TRINO_PASSWORD", "env-pass")
@@ -379,11 +380,35 @@ func TestNewTrinoConfigFallsBackWhenSecretSourceFails(t *testing.T) {
 
 func TestNewTrinoConfigFailsWhenRequiredSecretsFail(t *testing.T) {
 	t.Setenv("TRINO_SECRET_SOURCE", "command://local")
-	t.Setenv("TRINO_SECRET_COMMAND", "false")
+	t.Setenv("TRINO_SECRET_COMMAND", testSecretFailureCommand())
 	t.Setenv("TRINO_SECRET_REQUIRED", "true")
 	t.Setenv("OAUTH_ENABLED", "false")
 
 	if _, err := NewTrinoConfig(); err == nil {
 		t.Fatalf("expected NewTrinoConfig() to fail when required secret source is unavailable")
 	}
+}
+
+func TestNewTrinoConfigValidatesExternalAuthHostFromSecretSource(t *testing.T) {
+	t.Setenv("TRINO_SECRET_SOURCE", "command://local")
+	t.Setenv("TRINO_SECRET_COMMAND", testSecretJSONCommand(`{"TRINO_HOST":"trino.example.com"}`))
+	t.Setenv("TRINO_AUTH_MODE", "external")
+	t.Setenv("TRINO_SCHEME", "http")
+	t.Setenv("TRINO_HOST", "localhost")
+	t.Setenv("OAUTH_ENABLED", "false")
+
+	if _, err := NewTrinoConfig(); err == nil {
+		t.Fatalf("expected NewTrinoConfig() to reject non-loopback external auth host from secret source")
+	}
+}
+
+func testSecretJSONCommand(payload string) string {
+	if runtime.GOOS == "windows" {
+		return "Write-Output '" + payload + "'"
+	}
+	return "printf '%s' '" + payload + "'"
+}
+
+func testSecretFailureCommand() string {
+	return "exit 1"
 }

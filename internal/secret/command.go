@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -74,6 +75,14 @@ func defaultShellRunner(ctx context.Context, cmdStr string) ([]byte, error) {
 		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 	}
-	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+
+	shell := "sh"
+	args := []string{"-c", cmdStr}
+	if runtime.GOOS == "windows" {
+		shell = "powershell"
+		args = []string{"-NoProfile", "-NonInteractive", "-Command", cmdStr}
+	}
+
+	cmd := exec.CommandContext(ctx, shell, args...)
 	return cmd.Output()
 }
