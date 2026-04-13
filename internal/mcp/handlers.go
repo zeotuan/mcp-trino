@@ -53,15 +53,14 @@ func (h *TrinoHandlers) prepareImpersonationContext(ctx context.Context) context
 
 // ExecuteQuery handles query execution
 func (h *TrinoHandlers) ExecuteQuery(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-    if h.Config.EnableImpersonation {
-        ctx = h.prepareImpersonationContext(ctx)
-    }
+	if h.Config.EnableImpersonation {
+		ctx = h.prepareImpersonationContext(ctx)
+	}
 
 	// Type assert Arguments to map[string]interface{}
-	args, ok := request.Params.Arguments.(map[string]interface{})
-	if !ok {
-		mcpErr := fmt.Errorf("invalid arguments format")
-		return mcp.NewToolResultErrorFromErr(mcpErr.Error(), mcpErr), nil
+	args, err := getArguments(request)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr(err.Error(), err), nil
 	}
 
 	// Extract the query parameter
@@ -132,10 +131,9 @@ func (h *TrinoHandlers) ListSchemas(ctx context.Context, request mcp.CallToolReq
 	}
 
 	// Type assert Arguments to map[string]interface{}
-	args, ok := request.Params.Arguments.(map[string]interface{})
-	if !ok {
-		mcpErr := fmt.Errorf("invalid arguments format")
-		return mcp.NewToolResultErrorFromErr(mcpErr.Error(), mcpErr), nil
+	args, err := getArguments(request)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr(err.Error(), err), nil
 	}
 
 	// Extract catalog parameter (optional)
@@ -168,10 +166,9 @@ func (h *TrinoHandlers) ListTables(ctx context.Context, request mcp.CallToolRequ
 	}
 
 	// Type assert Arguments to map[string]interface{}
-	args, ok := request.Params.Arguments.(map[string]interface{})
-	if !ok {
-		mcpErr := fmt.Errorf("invalid arguments format")
-		return mcp.NewToolResultErrorFromErr(mcpErr.Error(), mcpErr), nil
+	args, err := getArguments(request)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr(err.Error(), err), nil
 	}
 
 	// Extract catalog and schema parameters (optional)
@@ -207,10 +204,9 @@ func (h *TrinoHandlers) GetTableSchema(ctx context.Context, request mcp.CallTool
 	}
 
 	// Type assert Arguments to map[string]interface{}
-	args, ok := request.Params.Arguments.(map[string]interface{})
-	if !ok {
-		mcpErr := fmt.Errorf("invalid arguments format")
-		return mcp.NewToolResultErrorFromErr(mcpErr.Error(), mcpErr), nil
+	args, err := getArguments(request)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr(err.Error(), err), nil
 	}
 
 	// Extract parameters
@@ -256,10 +252,9 @@ func (h *TrinoHandlers) ExplainQuery(ctx context.Context, request mcp.CallToolRe
 	}
 
 	// Type assert Arguments to map[string]interface{}
-	args, ok := request.Params.Arguments.(map[string]interface{})
-	if !ok {
-		mcpErr := fmt.Errorf("invalid arguments format")
-		return mcp.NewToolResultErrorFromErr(mcpErr.Error(), mcpErr), nil
+	args, err := getArguments(request)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr(err.Error(), err), nil
 	}
 
 	// Extract the query parameter
@@ -342,4 +337,17 @@ func RegisterTrinoTools(m *server.MCPServer, h *TrinoHandlers) {
 		mcp.WithString("query", mcp.Required(), mcp.Description("SQL query to analyze (SELECT, JOIN, aggregations, etc.)")),
 		mcp.WithString("format", mcp.Description("Plan type: LOGICAL, DISTRIBUTED, VALIDATE, or IO (optional)"))),
 		h.ExplainQuery)
+}
+
+func getArguments(request mcp.CallToolRequest) (map[string]interface{}, error) {
+	if request.Params.Arguments == nil {
+		return map[string]interface{}{}, nil
+	}
+
+	args, ok := request.Params.Arguments.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid arguments format")
+	}
+
+	return args, nil
 }

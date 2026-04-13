@@ -119,7 +119,7 @@ func TestExecuteQuery_MissingQueryParam(t *testing.T) {
 		{
 			name:      "nil arguments",
 			args:      nil,
-			wantError: "invalid arguments format",
+			wantError: "query parameter must be a string",
 		},
 		{
 			name:      "empty arguments map",
@@ -176,6 +176,26 @@ func TestExplainQuery_MissingQueryParam(t *testing.T) {
 	assertContentContains(t, result, "query parameter must be a string")
 }
 
+func TestExplainQuery_NilArguments(t *testing.T) {
+	handlers := newTestHandlers(&config.TrinoConfig{
+		MaxRows:      100,
+		QueryTimeout: 60 * time.Second,
+	})
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "explain_query"
+	req.Params.Arguments = nil
+
+	result, err := handlers.ExplainQuery(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ExplainQuery returned unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected IsError=true for missing query parameter")
+	}
+	assertContentContains(t, result, "query parameter must be a string")
+}
+
 // TestGetTableSchema_MissingTableParam verifies that GetTableSchema rejects
 // requests without the required "table" argument.
 func TestGetTableSchema_MissingTableParam(t *testing.T) {
@@ -190,6 +210,26 @@ func TestGetTableSchema_MissingTableParam(t *testing.T) {
 		"catalog": "hive",
 		"schema":  "analytics",
 	}
+
+	result, err := handlers.GetTableSchema(context.Background(), req)
+	if err != nil {
+		t.Fatalf("GetTableSchema returned unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected IsError=true for missing table parameter")
+	}
+	assertContentContains(t, result, "table parameter is required")
+}
+
+func TestGetTableSchema_NilArguments(t *testing.T) {
+	handlers := newTestHandlers(&config.TrinoConfig{
+		MaxRows:      100,
+		QueryTimeout: 60 * time.Second,
+	})
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "get_table_schema"
+	req.Params.Arguments = nil
 
 	result, err := handlers.GetTableSchema(context.Background(), req)
 	if err != nil {
@@ -388,6 +428,32 @@ func TestNoTruncationWhenUnderLimit(t *testing.T) {
 	// Verify no structuredContent
 	if result.StructuredContent != nil {
 		t.Error("expected no structuredContent when under limit")
+	}
+}
+
+func TestGetArguments_NilArguments(t *testing.T) {
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = nil
+
+	args, err := getArguments(req)
+	if err != nil {
+		t.Fatalf("getArguments returned unexpected error: %v", err)
+	}
+	if len(args) != 0 {
+		t.Fatalf("expected empty args map, got %#v", args)
+	}
+}
+
+func TestGetArguments_InvalidArguments(t *testing.T) {
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = "not-a-map"
+
+	_, err := getArguments(req)
+	if err == nil {
+		t.Fatal("expected error for invalid arguments format")
+	}
+	if err.Error() != "invalid arguments format" {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
